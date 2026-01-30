@@ -1,0 +1,206 @@
+#!/bin/bash
+#
+# HarmonyOS 一键编译部署脚本
+# 用法: bash build_and_deploy.sh [选项]
+#
+# 选项:
+#   -p, --project <path>    项目路径（默认当前目录）
+#   -m, --module <name>     模块名称（默认 entry）
+#   -b, --build-mode <mode> 构建模式: debug|release（默认 debug）
+#   -d, --device <id>       目标设备 ID（默认自动选择第一个）
+#   -s, --skip-build        跳过编译，直接安装
+#   -l, --launch            安装后启动应用
+#   -c, --clean             编译前清理
+#   -h, --help              显示帮助信息
+#
+
+set -e
+
+# 默认配置
+PROJECT_PATH="."
+MODULE_NAME="entry"
+BUILD_MODE="debug"
+DEVICE_ID=""
+SKIP_BUILD=false
+LAUNCH_APP=false
+CLEAN_BUILD=false
+
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+show_help() {
+    head -20 "$0" | tail -15
+    exit 0
+}
+
+# 解析参数
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p|--project)   PROJECT_PATH="$2"; shift 2 ;;
+        -m|--module)    MODULE_NAME="$2"; shift 2 ;;
+        -b|--build-mode) BUILD_MODE="$2"; shift 2 ;;
+        -d|--device)    DEVICE_ID="$2"; shift 2 ;;
+        -s|--skip-build) SKIP_BUILD=true; shift ;;
+        -l|--launch)    LAUNCH_APP=true; shift ;;
+        -c|--clean)     CLEAN_BUILD=true; shift ;;
+        -h|--help)      show_help ;;
+        *)              log_error "未知参数: $1"; exit 1 ;;
+    esac
+done
+
+# 检查项目路径
+if [[ ! -d "$PROJECT_PATH" ]]; then
+    log_error "项目路径不存在: $PROJECT_PATH"
+    exit 1
+fi
+
+cd "$PROJECT_PATH"
+log_info "工作目录: $(pwd)"
+
+# 检查是否为鸿蒙项目
+if [[ ! -f "build-profile.json5" ]]; then
+    log_error "当前目录不是有效的鸿蒙项目（缺少 build-profile.json5）"
+    exit 1
+fi
+
+# 检测构建工具
+HVIGOR_CMD=""
+if [[ -f "hvigorw" ]]; then
+    HVIGOR_CMD="./hvigorw"
+elif [[ -f "hvigorw.bat" ]] && [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+    HVIGOR_CMD="./hvigorw.bat"
+elif command -v hvigorw &> /dev/null; then
+    HVIGOR_CMD="hvigorw"
+else
+    log_error "找不到 hvigorw 构建工具"
+    log_info "请确保项目根目录有 hvigorw 或全局安装: npm install -g @ohos/hvigor-cli"
+    exit 1
+fi
+
+# 检测 hdc
+if ! command -v hdc &> /dev/null; then
+    log_error "找不到 hdc 工具，请确保 HarmonyOS SDK 已正确配置"
+    exit 1
+fi
+
+# 获取设备列表
+log_info "检查连接的设备..."
+DEVICES=$(hdc list targets 2>/dev/null | grep -v "^\[" | grep -v "^$" || true)
+
+if [[ -z "$DEVICES" ]]; then
+    log_error "没有检测到已连接的设备"
+    log_info "请确保："
+    log_info "  1. 设备已通过 USB 连接"
+    log_info "  2. 设备已开启 USB 调试"
+    log_info "  3. 电脑已授权调试"
+    exit 1
+fi
+
+# 选择设备
+if [[ -z "$DEVICE_ID" ]]; then
+    DEVICE_ID=$(echo "$DEVICES" | head -1)
+    DEVICE_COUNT=$(echo "$DEVICES" | wc -l)
+    if [[ $DEVICE_COUNT -gt 1 ]]; then
+        log_warn "检测到多个设备，使用第一个: $DEVICE_ID"
+        log_info "可用设备列表:"
+        echo "$DEVICES" | while read -r dev; do echo "  - $dev"; done
+    fi
+fi
+
+log_info "目标设备: $DEVICE_ID"
+
+# 清理构建
+if [[ "$CLEAN_BUILD" == true ]]; then
+    log_info "清理构建缓存..."
+    $HVIGOR_CMD clean --no-daemon 2>&1 || true
+fi
+
+# 编译项目
+if [[ "$SKIP_BUILD" == false ]]; then
+    log_info "开始编译项目（模式: $BUILD_MODE）..."
+    
+    BUILD_CMD="$HVIGOR_CMD assembleHap --mode module -p module=${MODULE_NAME}@default -p product=default -p buildMode=${BUILD_MODE} --no-daemon"
+    log_info "执行: $BUILD_CMD"
+    
+    if ! $BUILD_CMD; then
+        log_error "编译失败"
+        exit 1
+    fi
+    
+    log_success "编译完成"
+fi
+
+# 查找 HAP 文件
+HAP_DIR="${MODULE_NAME}/build/default/outputs/default"
+HAP_FILE=""
+
+# 优先查找签名包
+if [[ -f "${HAP_DIR}/${MODULE_NAME}-default-signed.hap" ]]; then
+    HAP_FILE="${HAP_DIR}/${MODULE_NAME}-default-signed.hap"
+elif [[ -f "${HAP_DIR}/${MODULE_NAME}-default-unsigned.hap" ]]; then
+    HAP_FILE="${HAP_DIR}/${MODULE_NAME}-default-unsigned.hap"
+    log_warn "使用未签名的 HAP 包，可能无法在真机上安装"
+else
+    # 尝试查找任意 HAP 文件
+    HAP_FILE=$(find "${HAP_DIR}" -name "*.hap" -type f 2>/dev/null | head -1)
+fi
+
+if [[ -z "$HAP_FILE" ]] || [[ ! -f "$HAP_FILE" ]]; then
+    log_error "找不到 HAP 文件，请检查编译输出"
+    log_info "期望路径: ${HAP_DIR}/"
+    exit 1
+fi
+
+log_info "HAP 文件: $HAP_FILE"
+
+# 安装应用
+log_info "正在安装到设备 $DEVICE_ID ..."
+
+if ! hdc -t "$DEVICE_ID" install "$HAP_FILE"; then
+    log_error "安装失败"
+    log_info "常见原因："
+    log_info "  1. 签名证书不匹配"
+    log_info "  2. 设备未授权安装"
+    log_info "  3. 应用版本冲突（尝试先卸载）"
+    exit 1
+fi
+
+log_success "安装成功！"
+
+# 启动应用
+if [[ "$LAUNCH_APP" == true ]]; then
+    # 从 app.json5 或 module.json5 读取包名和 Ability 名
+    BUNDLE_NAME=""
+    ABILITY_NAME=""
+    
+    if [[ -f "AppScope/app.json5" ]]; then
+        BUNDLE_NAME=$(grep -o '"bundleName"[[:space:]]*:[[:space:]]*"[^"]*"' AppScope/app.json5 | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    fi
+    
+    if [[ -f "${MODULE_NAME}/src/main/module.json5" ]]; then
+        ABILITY_NAME=$(grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*Ability[^"]*"' "${MODULE_NAME}/src/main/module.json5" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    fi
+    
+    if [[ -z "$BUNDLE_NAME" ]]; then
+        log_warn "无法自动获取包名，跳过启动"
+    elif [[ -z "$ABILITY_NAME" ]]; then
+        ABILITY_NAME="EntryAbility"
+        log_info "使用默认 Ability: $ABILITY_NAME"
+    fi
+    
+    if [[ -n "$BUNDLE_NAME" ]]; then
+        log_info "启动应用: $BUNDLE_NAME / $ABILITY_NAME"
+        hdc -t "$DEVICE_ID" shell aa start -a "$ABILITY_NAME" -b "$BUNDLE_NAME" || log_warn "启动失败，请手动打开应用"
+    fi
+fi
+
+log_success "部署完成！"
