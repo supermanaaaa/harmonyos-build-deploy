@@ -5,6 +5,24 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-NEXT-red.svg)]()
+[![npm](https://img.shields.io/npm/v/harmonyos-deploy.svg)](https://www.npmjs.com/package/harmonyos-deploy)
+
+## 🚀 一分钟上手（推荐）
+
+在你的鸿蒙项目根目录运行：
+
+```bash
+# 编译并安装到真机
+npx harmonyos-deploy
+
+# Release 模式 + 安装后启动
+npx harmonyos-deploy --release --launch
+
+# 跳过编译，直接安装
+npx harmonyos-deploy --skip-build
+```
+
+无需安装，开箱即用！
 
 ## ✨ 功能特性
 
@@ -18,100 +36,82 @@
 
 ## 📋 环境要求
 
+- [Node.js](https://nodejs.org/) 14.0+（推荐，用于 npx 方式）
 - [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/) 或独立 HarmonyOS SDK
 - hvigorw 构建工具（随 DevEco Studio 安装）
 - hdc 设备连接工具（随 SDK 安装）
 - 已配置签名证书（真机安装必需）
 
-## 🚀 快速开始
+## 📖 使用说明
 
-### 1. 下载脚本
+### 方式一：npx（推荐）
+
+无需安装，直接在项目目录运行：
 
 ```bash
-# 克隆仓库
-git clone https://github.com/YOUR_USERNAME/harmonyos-build-deploy.git
+# 基本用法 - 编译并安装
+npx harmonyos-deploy
 
-# 或直接下载脚本到项目根目录
+# Release 模式
+npx harmonyos-deploy --release
+
+# 安装后自动启动
+npx harmonyos-deploy --launch
+
+# 清理后重新编译
+npx harmonyos-deploy --clean
+
+# 跳过编译，直接安装
+npx harmonyos-deploy --skip-build
+
+# 指定模块（多模块项目）
+npx harmonyos-deploy --module feature
+
+# 指定设备
+npx harmonyos-deploy --device YOUR_DEVICE_ID
+
+# 组合使用
+npx harmonyos-deploy --release --launch --clean
 ```
 
-### 2. 复制到项目
+### 方式二：全局安装
 
-将对应平台的脚本复制到你的鸿蒙项目根目录（与 `build-profile.json5` 同级）。
+```bash
+npm install -g harmonyos-deploy
 
-### 3. 运行
+# 然后直接运行
+harmonyos-deploy --release --launch
+```
+
+### 方式三：Shell 脚本
+
+如果不想用 Node.js，也可以使用原生脚本：
 
 **Windows (PowerShell):**
 ```powershell
-.\build_and_deploy.ps1
+.\scripts\build_and_deploy.ps1
+.\scripts\build_and_deploy.ps1 -BuildMode release -Launch
 ```
 
 **macOS / Linux:**
 ```bash
-chmod +x build_and_deploy.sh
-./build_and_deploy.sh
+bash scripts/build_and_deploy.sh
+bash scripts/build_and_deploy.sh -b release -l
 ```
 
-## 📖 使用说明
+## 🔧 CLI 参数对照表
 
-### 编译部署脚本
+| 功能 | npx / 全局安装 | PowerShell | Bash |
+|------|---------------|------------|------|
+| 编译+安装 | `npx harmonyos-deploy` | `.\build_and_deploy.ps1` | `./build_and_deploy.sh` |
+| Release 模式 | `--release` | `-BuildMode release` | `-b release` |
+| 安装后启动 | `--launch` 或 `-l` | `-Launch` | `-l` |
+| 清理编译 | `--clean` 或 `-c` | `-Clean` | `-c` |
+| 跳过编译 | `--skip-build` 或 `-s` | `-SkipBuild` | `-s` |
+| 指定模块 | `--module <n>` | `-Module <n>` | `-m <n>` |
+| 指定设备 | `--device <id>` | `-Device <id>` | `-d <id>` |
 
-#### Windows (PowerShell)
-
-```powershell
-# 基本用法 - 编译并安装
-.\build_and_deploy.ps1
-
-# Release 模式
-.\build_and_deploy.ps1 -BuildMode release
-
-# 安装后自动启动应用
-.\build_and_deploy.ps1 -Launch
-
-# 清理后重新编译
-.\build_and_deploy.ps1 -Clean
-
-# 跳过编译，直接安装已有 HAP
-.\build_and_deploy.ps1 -SkipBuild
-
-# 指定模块（多模块项目）
-.\build_and_deploy.ps1 -Module feature
-
-# 指定设备（多设备连接时）
-.\build_and_deploy.ps1 -Device "YOUR_DEVICE_ID"
-
-# 组合使用
-.\build_and_deploy.ps1 -BuildMode release -Launch -Clean
-```
-
-#### macOS / Linux
-
-```bash
-# 基本用法 - 编译并安装
-./build_and_deploy.sh
-
-# Release 模式
-./build_and_deploy.sh -b release
-
-# 安装后自动启动应用
-./build_and_deploy.sh -l
-
-# 清理后重新编译
-./build_and_deploy.sh -c
-
-# 跳过编译，直接安装已有 HAP
-./build_and_deploy.sh -s
-
-# 指定模块
-./build_and_deploy.sh -m feature
-
-# 指定设备
-./build_and_deploy.sh -d "YOUR_DEVICE_ID"
-
-# 组合使用
-./build_and_deploy.sh -b release -l -c
-```
-
-### 设备管理工具
+## 🛠️ 设备管理
 
 #### Windows (PowerShell)
 
@@ -210,15 +210,19 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 
 ```
 harmonyos-build-deploy/
-├── README.md                    # 本文件
-├── LICENSE                      # MIT 许可证
+├── package.json                 # npm 包配置
+├── bin/
+│   └── harmonyos-deploy.js     # Node.js CLI 入口
 ├── scripts/
 │   ├── build_and_deploy.ps1    # Windows 编译部署脚本
 │   ├── build_and_deploy.sh     # macOS/Linux 编译部署脚本
 │   ├── device_manager.ps1      # Windows 设备管理工具
 │   └── device_manager.sh       # macOS/Linux 设备管理工具
-└── docs/
-    └── signing-guide.md        # 签名配置指南
+├── docs/
+│   └── signing-guide.md        # 签名配置指南
+├── SKILL.md                    # Claude Skills 配置
+├── README.md
+└── LICENSE
 ```
 
 ## 🤝 贡献

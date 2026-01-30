@@ -1,0 +1,42 @@
+{
+  "name": "harmonyos-deploy",
+  "version": "1.0.0",
+  "description": "HarmonyOS build and deploy automation - compile and install apps to real devices with one command",
+  "main": "bin/harmonyos-deploy.js",
+  "bin": {
+    "harmonyos-deploy": "bin/harmonyos-deploy.js"
+  },
+  "scripts": {
+    "start": "node bin/harmonyos-deploy.js"
+  },
+  "keywords": [
+    "harmonyos",
+    "harmonyos-next",
+    "deveco-studio",
+    "openharmony",
+    "hdc",
+    "hvigor",
+    "build",
+    "deploy",
+    "automation",
+    "cli"
+  ],
+  "author": "supermanaaaa",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/supermanaaaa/harmonyos-build-deploy.git"
+  },
+  "homepage": "https://github.com/supermanaaaa/harmonyos-build-deploy#readme",
+  "bugs": {
+    "url": "https://github.com/supermanaaaa/harmonyos-build-deploy/issues"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ]
+}
