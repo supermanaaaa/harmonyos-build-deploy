@@ -33,7 +33,8 @@ param(
     [string]$Device = "",
     [switch]$SkipBuild,
     [switch]$Launch,
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$All
 )
 
 $ErrorActionPreference = "Stop"
@@ -109,19 +110,60 @@ if ($Clean) {
 
 # Build
 if (-not $SkipBuild) {
-    Write-Info "Building project (mode: $BuildMode)..."
-    
-    $buildCmd = "$hvigorCmd assembleHap --mode module -p module=$Module@default -p product=default -p buildMode=$BuildMode --no-daemon"
-    Write-Info "Executing: $buildCmd"
-    
-    & $hvigorCmd assembleHap --mode module -p "module=$Module@default" -p product=default -p "buildMode=$BuildMode" --no-daemon
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Err "Build failed"
-        exit 1
+    if ($All) {
+        Write-Info "Building ALL modules (mode: $BuildMode)..."
+        $buildCmd = "$hvigorCmd assembleHap -p product=default -p buildMode=$BuildMode --no-daemon"
+        Write-Info "Executing: $buildCmd"
+        
+        try {
+            $output = & $hvigorCmd assembleHap -p product=default -p "buildMode=$BuildMode" --no-daemon 2>&1
+            $output | ForEach-Object { Write-Host $_ }
+            
+            if ($LASTEXITCODE -ne 0) {
+                throw "Build failed with exit code $LASTEXITCODE"
+            }
+            
+            Write-Success "Build completed"
+        }
+        catch {
+            Write-Err "Build failed"
+            Write-Host ""
+            Write-Info "Common build errors:"
+            Write-Info "  1. ArkTS syntax error - check the file and line number above"
+            Write-Info "  2. Missing dependency - run: ohpm install"
+            Write-Info "  3. SDK version mismatch - check compileSdkVersion in build-profile.json5"
+            Write-Info "  4. Signing config error - check signingConfigs in build-profile.json5"
+            exit 1
+        }
     }
-    
-    Write-Success "Build completed"
+    else {
+        Write-Info "Building module '$Module' (mode: $BuildMode)..."
+        $buildCmd = "$hvigorCmd assembleHap --mode module -p module=$Module@default -p product=default -p buildMode=$BuildMode --no-daemon"
+        Write-Info "Executing: $buildCmd"
+        
+        try {
+            $output = & $hvigorCmd assembleHap --mode module -p "module=$Module@default" -p product=default -p "buildMode=$BuildMode" --no-daemon 2>&1
+            $output | ForEach-Object { Write-Host $_ }
+            
+            if ($LASTEXITCODE -ne 0) {
+                throw "Build failed with exit code $LASTEXITCODE"
+            }
+            
+            Write-Success "Build completed"
+        }
+        catch {
+            Write-Err "Build failed"
+            Write-Host ""
+            Write-Info "Common build errors:"
+            Write-Info "  1. ArkTS syntax error - check the file and line number above"
+            Write-Info "  2. Missing dependency - run: ohpm install"
+            Write-Info "  3. SDK version mismatch - check compileSdkVersion in build-profile.json5"
+            Write-Info "  4. Signing config error - check signingConfigs in build-profile.json5"
+            Write-Host ""
+            Write-Warn "TIP: For multi-module projects, try: -All to build all modules"
+            exit 1
+        }
+    }
 }
 
 # Find HAP file
@@ -156,14 +198,17 @@ Write-Info "HAP file: $hapFile"
 # Install
 Write-Info "Installing to device $Device ..."
 
-& hdc -t $Device install $hapFile
+$installOutput = & hdc -t $Device install $hapFile 2>&1
+$installOutput | ForEach-Object { Write-Host $_ }
 
 if ($LASTEXITCODE -ne 0) {
     Write-Err "Install failed"
+    Write-Host ""
     Write-Info "Common causes:"
-    Write-Info "  1. Signature mismatch"
-    Write-Info "  2. Device not authorized"
-    Write-Info "  3. Version conflict (try uninstall first)"
+    Write-Info "  1. Signature mismatch - certificate does not match the one used previously"
+    Write-Info "  2. Device not authorized - check developer options on device"
+    Write-Info "  3. Version conflict - try uninstall first: hdc -t $Device uninstall <bundleName>"
+    Write-Info "  4. Insufficient storage - free up space on device"
     exit 1
 }
 

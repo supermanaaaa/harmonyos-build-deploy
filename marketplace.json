@@ -1,7 +1,7 @@
 {
   "name": "harmonyos-build-deploy",
-  "version": "1.0.0",
-  "description": "HarmonyOS build and deploy automation - compile and install apps to real devices with one command",
+  "version": "2.0.0",
+  "description": "HarmonyOS build and deploy automation - compile multi-module apps and install to real devices with one command. Supports product variants, build modes, dependency resolution, and skip-build safety checks.",
   "author": "supermanaaaa",
   "repository": "https://github.com/supermanaaaa/harmonyos-build-deploy",
   "keywords": [
@@ -12,7 +12,10 @@
     "hvigor",
     "automation",
     "build",
-    "deploy"
+    "deploy",
+    "multi-module",
+    "hsp",
+    "hap"
   ],
   "license": "MIT"
 }

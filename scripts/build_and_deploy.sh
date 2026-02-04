@@ -4,6 +4,7 @@
 # 用法: bash build_and_deploy.sh [选项]
 #
 # 选项:
+#   -a, --all               编译所有模块（推荐多模块项目使用）
 #   -p, --project <path>    项目路径（默认当前目录）
 #   -m, --module <name>     模块名称（默认 entry）
 #   -b, --build-mode <mode> 构建模式: debug|release（默认 debug）
@@ -24,6 +25,7 @@ DEVICE_ID=""
 SKIP_BUILD=false
 LAUNCH_APP=false
 CLEAN_BUILD=false
+BUILD_ALL=false
 
 # 颜色输出
 RED='\033[0;31m'
@@ -52,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         -s|--skip-build) SKIP_BUILD=true; shift ;;
         -l|--launch)    LAUNCH_APP=true; shift ;;
         -c|--clean)     CLEAN_BUILD=true; shift ;;
+        -a|--all)       BUILD_ALL=true; shift ;;
         -h|--help)      show_help ;;
         *)              log_error "未知参数: $1"; exit 1 ;;
     esac
@@ -126,13 +129,33 @@ fi
 
 # 编译项目
 if [[ "$SKIP_BUILD" == false ]]; then
-    log_info "开始编译项目（模式: $BUILD_MODE）..."
+    if [[ "$BUILD_ALL" == true ]]; then
+        log_info "开始编译所有模块（模式: $BUILD_MODE）..."
+        BUILD_CMD="$HVIGOR_CMD assembleHap -p product=default -p buildMode=${BUILD_MODE} --no-daemon"
+    else
+        log_info "开始编译模块 '$MODULE_NAME'（模式: $BUILD_MODE）..."
+        BUILD_CMD="$HVIGOR_CMD assembleHap --mode module -p module=${MODULE_NAME}@default -p product=default -p buildMode=${BUILD_MODE} --no-daemon"
+    fi
     
-    BUILD_CMD="$HVIGOR_CMD assembleHap --mode module -p module=${MODULE_NAME}@default -p product=default -p buildMode=${BUILD_MODE} --no-daemon"
     log_info "执行: $BUILD_CMD"
     
-    if ! $BUILD_CMD; then
+    # 捕获输出和错误
+    BUILD_OUTPUT=$($BUILD_CMD 2>&1) || BUILD_EXIT_CODE=$?
+    
+    echo "$BUILD_OUTPUT"
+    
+    if [[ -n "$BUILD_EXIT_CODE" ]] && [[ "$BUILD_EXIT_CODE" -ne 0 ]]; then
         log_error "编译失败"
+        echo ""
+        log_info "常见编译错误："
+        log_info "  1. ArkTS 语法错误 - 检查上方显示的文件和行号"
+        log_info "  2. 缺少依赖 - 运行: ohpm install"
+        log_info "  3. SDK 版本不匹配 - 检查 build-profile.json5 中的 compileSdkVersion"
+        log_info "  4. 签名配置错误 - 检查 build-profile.json5 中的 signingConfigs"
+        if [[ "$BUILD_ALL" == false ]]; then
+            echo ""
+            log_warn "提示: 多模块项目请尝试 -a 参数编译所有模块"
+        fi
         exit 1
     fi
     
@@ -165,12 +188,18 @@ log_info "HAP 文件: $HAP_FILE"
 # 安装应用
 log_info "正在安装到设备 $DEVICE_ID ..."
 
-if ! hdc -t "$DEVICE_ID" install "$HAP_FILE"; then
+INSTALL_OUTPUT=$(hdc -t "$DEVICE_ID" install "$HAP_FILE" 2>&1) || INSTALL_EXIT_CODE=$?
+
+echo "$INSTALL_OUTPUT"
+
+if [[ -n "$INSTALL_EXIT_CODE" ]] && [[ "$INSTALL_EXIT_CODE" -ne 0 ]]; then
     log_error "安装失败"
+    echo ""
     log_info "常见原因："
-    log_info "  1. 签名证书不匹配"
-    log_info "  2. 设备未授权安装"
-    log_info "  3. 应用版本冲突（尝试先卸载）"
+    log_info "  1. 签名证书不匹配 - 证书与之前安装时使用的不一致"
+    log_info "  2. 设备未授权安装 - 检查设备上的开发者选项"
+    log_info "  3. 应用版本冲突 - 尝试先卸载: hdc -t $DEVICE_ID uninstall <包名>"
+    log_info "  4. 存储空间不足 - 清理设备存储空间"
     exit 1
 fi
 
