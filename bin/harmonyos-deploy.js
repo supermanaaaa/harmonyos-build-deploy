@@ -23,6 +23,7 @@ const colors = {
   yellow: '\x1b[33m',
   blue: '\x1b[34m',
   cyan: '\x1b[36m',
+  dim: '\x1b[2m',
 };
 
 const log = {
@@ -31,6 +32,87 @@ const log = {
   warn: (msg) => console.log(`${colors.yellow}[WARN]${colors.reset} ${msg}`),
   error: (msg) => console.log(`${colors.red}[ERROR]${colors.reset} ${msg}`),
 };
+
+// Diagnose common build errors and suggest fixes
+function diagnoseBuildError(errorOutput) {
+  if (!errorOutput) return;
+  
+  const diagnostics = [];
+  const errStr = typeof errorOutput === 'string' ? errorOutput : String(errorOutput);
+  
+  // Hvigor version mismatch
+  if (errStr.includes('Unsupported modelVersion')) {
+    diagnostics.push({
+      issue: 'Hvigor version mismatch',
+      fix: 'Use DevEco Studio built-in hvigorw, or update hvigor-config.json5 modelVersion',
+    });
+  }
+  
+  // DEVECO_SDK_HOME
+  if (errStr.includes('DEVECO_SDK_HOME')) {
+    diagnostics.push({
+      issue: 'DEVECO_SDK_HOME not set or invalid',
+      fix: 'Set environment variable: $env:DEVECO_SDK_HOME = "C:\\Program Files\\Huawei\\DevEco Studio\\sdk"',
+    });
+  }
+  
+  // Signing error
+  if (errStr.includes('sign') || errStr.includes('signature') || errStr.includes('SignProfile')) {
+    diagnostics.push({
+      issue: 'Signing configuration error',
+      fix: 'Check build-profile.json5 signing config, or re-sign in DevEco Studio (Build → Generate Key and CSR)',
+    });
+  }
+  
+  // SDK version
+  if (errStr.includes('compileSdkVersion') || errStr.includes('compatibleSdkVersion')) {
+    diagnostics.push({
+      issue: 'SDK version mismatch',
+      fix: 'Check compileSdkVersion in build-profile.json5 matches your installed SDK',
+    });
+  }
+  
+  // ArkTS syntax
+  if (errStr.includes('ArkTS') || errStr.includes('ets(') || errStr.includes('.ets:')) {
+    diagnostics.push({
+      issue: 'ArkTS compilation error',
+      fix: 'Check the file and line number in the error above',
+    });
+  }
+  
+  // Missing dependency
+  if (errStr.includes('Cannot find module') || errStr.includes('ohpm') || errStr.includes('oh_modules')) {
+    diagnostics.push({
+      issue: 'Missing dependency',
+      fix: 'Run: ohpm install',
+    });
+  }
+  
+  // atomicService limitation
+  if (errStr.includes('atomicService') || errStr.includes('atomic_service')) {
+    diagnostics.push({
+      issue: 'API not supported in atomicService mode',
+      fix: 'Change bundleType to "app" in AppScope/app.json5, or use supported APIs',
+    });
+  }
+  
+  // Install type conflict
+  if (errStr.includes('9568296') || errStr.includes('error bundle type')) {
+    diagnostics.push({
+      issue: 'Bundle type conflict (atomicService vs app)',
+      fix: 'Uninstall the old app first: use --uninstall flag, or run: hdc uninstall <bundleName>',
+    });
+  }
+  
+  if (diagnostics.length > 0) {
+    console.log('');
+    log.info('Diagnosis:');
+    diagnostics.forEach((d, i) => {
+      console.log(`  ${i + 1}. ${colors.yellow}${d.issue}${colors.reset}`);
+      console.log(`     → ${d.fix}`);
+    });
+  }
+}
 
 // Parse command line arguments
 function parseArgs() {
@@ -49,6 +131,10 @@ function parseArgs() {
     listProducts: false,  // 列出可用产品
     listBuildModes: false,  // 列出可用构建模式
     debuggable: null,  // null = auto (release→false, else→true), true/false = override
+    showLog: false,  // 安装启动后显示实时日志
+    logOnly: false,  // 仅查看日志，不编译不安装
+    logFilter: '',  // 日志过滤 tag
+    listDevices: false,  // 列出所有已连接设备
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -115,6 +201,18 @@ function parseArgs() {
       case '--list-build-modes':
         options.listBuildModes = true;
         break;
+      case '--log':
+        options.showLog = true;
+        break;
+      case '--log-only':
+        options.logOnly = true;
+        break;
+      case '--filter':
+        options.logFilter = args[++i];
+        break;
+      case '--list-devices':
+        options.listDevices = true;
+        break;
     }
   }
 
@@ -140,23 +238,31 @@ Options:
       --debuggable           Force debuggable=true (default: auto based on build mode)
       --no-debuggable        Force debuggable=false
   -d, --device <id>          Target device ID (auto-select if not specified)
+      --list-devices         List all connected devices with details
   -s, --skip-build           Skip build, install existing HAP only
   -l, --launch               Launch app after installation
   -c, --clean                Clean before build
   -u, --uninstall            Uninstall existing app before install
+      --log                  Show real-time device log after deploy (Ctrl+C to stop)
+      --log-only             Only show device log, skip build and install
+      --filter <tag>         Filter log by tag (used with --log or --log-only)
   -h, --help                 Show this help message
 
 Examples:
-  npx harmonyos-deploy                          # Build entry module and install
-  npx harmonyos-deploy --all --launch           # Build all, install, and launch
-  npx harmonyos-deploy --all -u --launch        # Uninstall first, build all + install + launch
-  npx harmonyos-deploy --all -p cheng_tu_test   # Build with specific product flavor
-  npx harmonyos-deploy --list-products          # Show available product flavors
-  npx harmonyos-deploy --all --release          # Build all in release mode
-  npx harmonyos-deploy --all -b test            # Build all in test mode
-  npx harmonyos-deploy --all -b custom_mode     # Build with custom build mode
-  npx harmonyos-deploy --list-build-modes       # Show available build modes
-  npx harmonyos-deploy -c --all                 # Clean and build all
+  npx harmonyos-deploy                              # Build entry module and install
+  npx harmonyos-deploy --all --launch               # Build all, install, and launch
+  npx harmonyos-deploy --all -u --launch            # Uninstall first, build all + install + launch
+  npx harmonyos-deploy --all -p cheng_tu_test       # Build with specific product flavor
+  npx harmonyos-deploy --list-products              # Show available product flavors
+  npx harmonyos-deploy --all --release              # Build all in release mode
+  npx harmonyos-deploy --all -b test                # Build all in test mode
+  npx harmonyos-deploy --all -b custom_mode         # Build with custom build mode
+  npx harmonyos-deploy --list-build-modes           # Show available build modes
+  npx harmonyos-deploy -c --all                     # Clean and build all
+  npx harmonyos-deploy --all --launch --log         # Build + install + launch + tail log
+  npx harmonyos-deploy --log-only                   # Just show device log
+  npx harmonyos-deploy --log-only --filter MyTag    # Show log filtered by tag
+  npx harmonyos-deploy --list-devices               # List connected devices with info
 
 Note: Use --all for projects with shared libraries/modules.
       Use --product to select environments (test/debug/release) with different signing configs.
@@ -773,6 +879,140 @@ function getDevices() {
     .filter(line => line && !line.startsWith('[') && line.toLowerCase() !== 'empty');
 }
 
+// Get device detail info (model, os version, etc.)
+function getDeviceInfo(deviceId) {
+  const info = {};
+  try {
+    info.model = execSilent(`hdc -t ${deviceId} shell param get const.product.model`) || 'Unknown';
+    info.brand = execSilent(`hdc -t ${deviceId} shell param get const.product.brand`) || '';
+    info.osVersion = execSilent(`hdc -t ${deviceId} shell param get const.product.software.version`) || '';
+    info.apiVersion = execSilent(`hdc -t ${deviceId} shell param get const.ohos.apiversion`) || '';
+  } catch (e) { /* ignore */ }
+  return info;
+}
+
+// List devices with details
+function showDeviceList() {
+  if (!commandExists('hdc')) {
+    log.error('Cannot find hdc tool');
+    return;
+  }
+  
+  const devices = getDevices();
+  if (devices.length === 0) {
+    log.info('No devices connected');
+    return;
+  }
+  
+  log.info(`Found ${devices.length} device(s):\n`);
+  devices.forEach((deviceId, i) => {
+    const info = getDeviceInfo(deviceId);
+    const label = [info.brand, info.model].filter(Boolean).join(' ') || 'Unknown device';
+    const osInfo = info.osVersion ? ` | OS: ${info.osVersion}` : '';
+    const apiInfo = info.apiVersion ? ` | API: ${info.apiVersion}` : '';
+    console.log(`  [${i + 1}] ${deviceId}`);
+    console.log(`      ${label}${osInfo}${apiInfo}`);
+  });
+  console.log('');
+  log.info('To use a specific device:');
+  log.info(`  npx harmonyos-deploy --all --launch -d ${devices[0]}`);
+}
+
+// Start real-time log streaming
+function startLogStream(device, bundleName, filter) {
+  log.info('');
+  log.info('=== Real-time Device Log (Ctrl+C to stop) ===');
+  log.info('');
+  
+  // Build hilog command with filter
+  let logCmd = `hdc -t ${device} shell hilog`;
+  
+  // Use hilog filter if bundleName available
+  const filterParts = [];
+  if (bundleName) {
+    filterParts.push(bundleName);
+  }
+  if (filter) {
+    filterParts.push(filter);
+  }
+  
+  if (filterParts.length > 0) {
+    // Use grep to filter (hilog's own filter is limited)
+    logCmd = `hdc -t ${device} shell "hilog | grep -E '${filterParts.join('|')}'"`;
+  }
+  
+  try {
+    // Use spawn for streaming (exec would buffer the entire output)
+    const { spawn } = require('child_process');
+    const isWindows = os.platform() === 'win32';
+    
+    let child;
+    if (isWindows) {
+      child = spawn('cmd', ['/c', logCmd], { stdio: 'inherit' });
+    } else {
+      child = spawn('sh', ['-c', logCmd], { stdio: 'inherit' });
+    }
+    
+    // Handle Ctrl+C gracefully
+    process.on('SIGINT', () => {
+      child.kill();
+      console.log('');
+      log.info('Log streaming stopped');
+      process.exit(0);
+    });
+    
+    child.on('close', (code) => {
+      if (code !== 0 && code !== null) {
+        log.warn('Log stream ended');
+      }
+    });
+    
+    // Keep process alive
+    return new Promise(() => {}); // never resolves, wait for Ctrl+C
+  } catch (error) {
+    log.error(`Failed to start log stream: ${error.message}`);
+  }
+}
+
+// Simple performance timer
+function createTimer() {
+  const steps = [];
+  let current = null;
+  const startTime = Date.now();
+  
+  return {
+    start(name) {
+      if (current) {
+        current.end = Date.now();
+        steps.push(current);
+      }
+      current = { name, start: Date.now(), end: null };
+    },
+    stop() {
+      if (current) {
+        current.end = Date.now();
+        steps.push(current);
+        current = null;
+      }
+    },
+    summary() {
+      this.stop();
+      const totalMs = Date.now() - startTime;
+      
+      log.info('');
+      log.info('=== Performance Stats ===');
+      for (const step of steps) {
+        const ms = step.end - step.start;
+        const sec = (ms / 1000).toFixed(1);
+        const bar = '█'.repeat(Math.max(1, Math.round(ms / totalMs * 20)));
+        console.log(`  ${step.name.padEnd(16)} ${sec.padStart(6)}s  ${bar}`);
+      }
+      console.log(`  ${'─'.repeat(36)}`);
+      console.log(`  ${'Total'.padEnd(16)} ${(totalMs / 1000).toFixed(1).padStart(6)}s`);
+    }
+  };
+}
+
 // Find built package file (.hap or .hsp) for a module
 // Product affects output path: build/{product}/outputs/{product}/
 function findPackageFile(modulePath, moduleName, ext, product = 'default') {
@@ -925,6 +1165,31 @@ async function main() {
     process.exit(0);
   }
   
+  if (options.listDevices) {
+    showDeviceList();
+    process.exit(0);
+  }
+  
+  // --log-only: just show device log, skip everything else
+  if (options.logOnly) {
+    if (!commandExists('hdc')) {
+      log.error('Cannot find hdc tool');
+      process.exit(1);
+    }
+    const devices = getDevices();
+    if (devices.length === 0) {
+      log.error('No device connected');
+      process.exit(1);
+    }
+    const device = options.device || devices[0];
+    const bundleName = fs.existsSync('build-profile.json5') ? getBundleName(options.product) : null;
+    await startLogStream(device, bundleName, options.logFilter);
+    return;
+  }
+  
+  // Performance timer
+  const timer = createTimer();
+  
   log.info(`Working directory: ${process.cwd()}`);
   
   // Check if HarmonyOS project
@@ -988,6 +1253,7 @@ async function main() {
   
   // Clean
   if (options.clean) {
+    timer.start('Clean');
     log.info('Cleaning build cache...');
     try {
       exec(`${hvigorCmd} clean --no-daemon`, { silent: true, ignoreError: true });
@@ -997,6 +1263,7 @@ async function main() {
   // Build
   if (!options.skipBuild) {
     // First, install dependencies
+    timer.start('Dependencies');
     log.info('Installing dependencies (ohpm install)...');
     try {
       exec('ohpm install', { silent: false });
@@ -1018,6 +1285,8 @@ async function main() {
     }
     log.info(`Build mode: ${options.buildMode} (debuggable=${debuggable})`);
     
+    timer.start('Build');
+    
     if (options.all) {
       // 全量编译：自动解析依赖顺序
       log.info('Analyzing module dependencies...');
@@ -1037,6 +1306,7 @@ async function main() {
           if (error.stderr && error.stderr.trim()) {
             console.log(error.stderr);
           }
+          diagnoseBuildError(error.stderr || error.stdout || error.message);
           process.exit(1);
         }
       } else {
@@ -1061,6 +1331,7 @@ async function main() {
           exec(buildCmd);
         } catch (error) {
           log.error('HAP build failed');
+          diagnoseBuildError(error.stderr || error.stdout || error.message);
           process.exit(1);
         }
         
@@ -1074,6 +1345,7 @@ async function main() {
             exec(hspCmd);
           } catch (error) {
             log.error('HSP build failed');
+            diagnoseBuildError(error.stderr || error.stdout || error.message);
             process.exit(1);
           }
         }
@@ -1091,15 +1363,10 @@ async function main() {
         log.success('Build completed');
       } catch (error) {
         log.error('Build failed');
-        log.error('');
         if (error.stderr && error.stderr.trim()) {
           console.log(error.stderr);
         }
-        log.info('Common build errors:');
-        log.info('  1. ArkTS syntax error - check the file and line number above');
-        log.info('  2. Missing dependency - run: ohpm install');
-        log.info('  3. SDK version mismatch - check compileSdkVersion in build-profile.json5');
-        log.info('  4. Signing config error - check signingConfigs in build-profile.json5');
+        diagnoseBuildError(error.stderr || error.stdout || error.message);
         log.info('');
         log.warn('TIP: For multi-module projects, try: --all to build all modules with correct dependency order');
         process.exit(1);
@@ -1151,6 +1418,7 @@ async function main() {
   
   // Uninstall existing app before install (if --uninstall flag is set)
   // Also auto-uninstall if bundleType conflict detected
+  timer.start('Install');
   {
     const bundleName = getBundleName(options.product);
     const localBundleType = getBundleType();
@@ -1441,21 +1709,17 @@ async function main() {
       log.success('Install completed!');
     } catch (error) {
       log.error('Install failed');
-      log.error('');
       if (error.stderr && error.stderr.trim()) {
         console.log(error.stderr);
       }
-      log.info('Common causes:');
-      log.info('  1. Signature mismatch - certificate does not match the one used previously');
-      log.info('  2. Device not authorized - check developer options on device');
-      log.info('  3. Version conflict - try uninstall first: hdc -t ' + device + ' uninstall <bundleName>');
-      log.info('  4. Insufficient storage - free up space on device');
+      diagnoseBuildError(error.stderr || error.stdout || error.message);
       process.exit(1);
     }
   }
   
   // Launch
   if (options.launch) {
+    timer.start('Launch');
     const bundleName = getBundleName(options.product);
     const abilityName = getAbilityName(hapModule);
     
@@ -1471,7 +1735,16 @@ async function main() {
     }
   }
   
+  // Performance summary
+  timer.summary();
+  
   log.success('Deploy completed!');
+  
+  // Real-time log (--log flag)
+  if (options.showLog) {
+    const bundleName = getBundleName(options.product);
+    await startLogStream(device, bundleName, options.logFilter);
+  }
 }
 
 main().catch(error => {

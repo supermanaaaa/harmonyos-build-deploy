@@ -32,6 +32,9 @@ npx harmonyos-deploy --all --skip-build --launch
 - ⚡ **Force-stop** — 安装前自动停止运行中的应用，避免静默安装失败
 - 📦 **第三方 HSP** — 自动收集远程 HSP 依赖包一起安装
 - 📋 **自动检测** — 自动查找 hvigorw、hdc 设备、bundleName、签名包
+- 📊 **性能统计** — 显示各阶段耗时（依赖安装、编译、安装、启动）
+- 📝 **实时日志** — 部署后一键查看设备日志，支持 tag 过滤
+- 📱 **设备列表** — 查看已连接设备的型号、系统版本等详细信息
 
 ## 📋 环境要求
 
@@ -70,6 +73,14 @@ npx harmonyos-deploy -c --all --launch
 # 查看可用配置
 npx harmonyos-deploy --list-products
 npx harmonyos-deploy --list-build-modes
+npx harmonyos-deploy --list-devices
+
+# 部署后查看实时日志
+npx harmonyos-deploy --all --launch --log
+
+# 仅查看设备日志
+npx harmonyos-deploy --log-only
+npx harmonyos-deploy --log-only --filter MyTag
 ```
 
 ### 方式二：全局安装
@@ -135,10 +146,19 @@ bash scripts/build_and_deploy.sh -b release -l
 | 参数 | 说明 |
 |------|------|
 | `-d, --device <id>` | 指定目标设备（默认自动选择）|
+| `--list-devices` | 列出所有已连接设备及详细信息 |
 | `-s, --skip-build` | 跳过编译，直接安装已有产物 |
 | `-l, --launch` | 安装后自动启动应用 |
 | `-u, --uninstall` | 安装前先卸载旧应用（解决签名冲突）|
 | `-c, --clean` | 编译前清理 |
+
+### 调试与日志
+
+| 参数 | 说明 |
+|------|------|
+| `--log` | 部署完成后自动显示实时设备日志（Ctrl+C 停止）|
+| `--log-only` | 仅查看设备日志，不编译不安装 |
+| `--filter <tag>` | 按 tag 过滤日志（配合 `--log` 或 `--log-only` 使用）|
 
 ## ⚙️ 工作原理
 
@@ -163,6 +183,52 @@ You have two options:
      node harmonyos-deploy.js --all -b release --skip-build
   2. Build and install with debug mode:
      node harmonyos-deploy.js --all -b debug
+```
+
+## 📊 性能统计
+
+每次部署结束后自动显示各阶段耗时：
+
+```
+=== Performance Stats ===
+  Dependencies       0.5s  ██
+  Build              3.2s  ████████
+  Install            2.1s  █████
+  Launch             0.3s  █
+  ────────────────────────────────────
+  Total              6.1s
+```
+
+## 📝 实时日志
+
+部署后自动 tail 设备日志，方便快速调试：
+
+```bash
+# 部署 + 启动 + 自动查看日志
+npx harmonyos-deploy --all --launch --log
+
+# 仅查看日志（不编译不安装）
+npx harmonyos-deploy --log-only
+
+# 按 tag 过滤
+npx harmonyos-deploy --log-only --filter MyTag
+```
+
+按 `Ctrl+C` 停止日志查看。
+
+## 📱 设备列表
+
+查看已连接设备的详细信息：
+
+```bash
+npx harmonyos-deploy --list-devices
+
+# 输出示例:
+# Found 2 device(s):
+#   [1] 9CN0123529000015
+#       HUAWEI Mate 60 | OS: HarmonyOS-NEXT-5.0.1 | API: 12
+#   [2] ABCD1234567890
+#       HUAWEI P50 | OS: HarmonyOS-NEXT-5.0.0 | API: 12
 ```
 
 ## 🛠️ 设备管理
