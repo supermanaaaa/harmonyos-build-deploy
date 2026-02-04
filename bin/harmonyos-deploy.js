@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * HarmonyOS Build & Deploy CLI
  * Cross-platform tool for building and deploying HarmonyOS apps
@@ -576,19 +577,53 @@ function getModuleBuildOrder(modules) {
 }
 
 // Get module build command based on type
-function getModuleBuildCommand(hvigorCmd, module, buildMode, product = 'default', debuggable = true) {
+// hvigor 6.x uses different parameter format
+function getModuleBuildCommand(hvigorCmd, module, buildMode, product = 'default', debuggable = true, hvigorV6 = false) {
   const modType = module.type || 'hsp';
   
   // Determine build task based on module type
-  // Note: task name should be at the end of command
+  let task;
   if (modType === 'har') {
-    return `${hvigorCmd} --mode module -p module=${module.name}@default -p product=${product} -p buildMode=${buildMode} -p debuggable=${debuggable} assembleHar --no-daemon`;
+    task = 'assembleHar';
   } else if (modType === 'hsp') {
-    return `${hvigorCmd} --mode module -p module=${module.name}@default -p product=${product} -p buildMode=${buildMode} -p debuggable=${debuggable} assembleHsp --no-daemon`;
+    task = 'assembleHsp';
   } else {
-    // entry or feature -> HAP
-    return `${hvigorCmd} --mode module -p module=${module.name}@default -p product=${product} -p buildMode=${buildMode} -p debuggable=${debuggable} assembleHap --no-daemon`;
+    task = 'assembleHap';
   }
+  
+  return buildCommand(hvigorCmd, task, { module: `${module.name}@default`, product, buildMode, debuggable }, hvigorV6);
+}
+
+// Generate hvigor build command, adapting to hvigor version
+function buildCommand(hvigorCmd, task, params = {}, hvigorV6 = false) {
+  const parts = [hvigorCmd];
+  
+  if (hvigorV6) {
+    // Hvigor 6.x: simplified command, no --mode module or -p parameters
+    // Just: hvigorw assembleHap --no-daemon
+    parts.push(task);
+    parts.push('--no-daemon');
+  } else {
+    // Hvigor 5.x: full parameter format
+    if (params.module) {
+      parts.push('--mode module');
+      parts.push(`-p module=${params.module}`);
+    }
+    if (params.product) {
+      parts.push(`-p product=${params.product}`);
+    }
+    if (params.buildMode) {
+      parts.push(`-p buildMode=${params.buildMode}`);
+    }
+    if (params.debuggable !== undefined) {
+      parts.push(`-p debuggable=${params.debuggable}`);
+    }
+    
+    parts.push(task);
+    parts.push('--no-daemon');
+  }
+  
+  return parts.join(' ');
 }
 
 // Execute command and return output silently
@@ -612,10 +647,11 @@ function commandExists(cmd) {
 }
 
 // Find hvigor command
+// Priority: project local → DevEco Studio built-in → global
 function findHvigor() {
   const isWindows = os.platform() === 'win32';
   
-  // Check local hvigorw
+  // 1. Check local hvigorw (project root)
   if (isWindows && fs.existsSync('hvigorw.bat')) {
     return '.\\hvigorw.bat';
   }
@@ -623,12 +659,107 @@ function findHvigor() {
     return './hvigorw';
   }
   
-  // Check global hvigorw
+  // 2. Check DevEco Studio built-in hvigorw
+  if (isWindows) {
+    const programFiles = [
+      process.env['ProgramFiles'] || 'C:\\Program Files',
+      process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+    ];
+    for (const pf of programFiles) {
+      try {
+        // Scan for DevEco Studio installations (e.g. "DevEco Studio6.0.1", "DevEco Studio")
+        const entries = fs.readdirSync(path.join(pf, 'Huawei')).filter(d => d.startsWith('DevEco'));
+        for (const deveco of entries.sort().reverse()) { // prefer latest version
+          const hvigorPath = path.join(pf, 'Huawei', deveco, 'DevEco Studio', 'tools', 'hvigor', 'bin', 'hvigorw.bat');
+          if (fs.existsSync(hvigorPath)) {
+            log.info(`Found DevEco Studio hvigorw: ${hvigorPath}`);
+            return `"${hvigorPath}"`;
+          }
+        }
+      } catch (e) { /* scan error, continue */ }
+    }
+  } else {
+    // macOS: /Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw
+    const macPaths = [
+      '/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw',
+    ];
+    for (const p of macPaths) {
+      if (fs.existsSync(p)) {
+        log.info(`Found DevEco Studio hvigorw: ${p}`);
+        return `"${p}"`;
+      }
+    }
+  }
+  
+  // 3. Check global hvigorw
   if (commandExists('hvigorw')) {
     return 'hvigorw';
   }
   
   return null;
+}
+
+// Detect hvigor model version from hvigor-config.json5
+function getHvigorVersion() {
+  const configPaths = [
+    path.join('hvigor', 'hvigor-config.json5'),
+    'hvigor-config.json5',
+  ];
+  for (const configPath of configPaths) {
+    if (!fs.existsSync(configPath)) continue;
+    try {
+      const content = fs.readFileSync(configPath, 'utf8');
+      const match = content.match(/["']?modelVersion["']?\s*:\s*["']([^"']+)["']/);
+      if (match) return match[1];
+    } catch (e) { /* ignore */ }
+  }
+  return null;
+}
+
+// Check if hvigor version is 6.x or above (requires different command format)
+function isHvigorV6(version) {
+  if (!version) return false;
+  const major = parseInt(version.split('.')[0], 10);
+  return major >= 6;
+}
+
+// Setup DEVECO_SDK_HOME if not already set
+function ensureDevEcoSdkHome() {
+  if (process.env.DEVECO_SDK_HOME && fs.existsSync(process.env.DEVECO_SDK_HOME)) {
+    return; // already set and valid
+  }
+  
+  const isWindows = os.platform() === 'win32';
+  const candidates = [];
+  
+  if (isWindows) {
+    const programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    // Scan for DevEco Studio installations
+    try {
+      const huaweiDir = path.join(programFiles, 'Huawei');
+      if (fs.existsSync(huaweiDir)) {
+        const entries = fs.readdirSync(huaweiDir).filter(d => d.startsWith('DevEco'));
+        for (const deveco of entries.sort().reverse()) {
+          candidates.push(path.join(huaweiDir, deveco, 'DevEco Studio', 'sdk'));
+        }
+      }
+    } catch (e) { /* ignore */ }
+    candidates.push(path.join(os.homedir(), 'AppData', 'Local', 'Huawei', 'sdk'));
+    candidates.push(path.join(os.homedir(), 'AppData', 'Local', 'OpenHarmony', 'Sdk'));
+  } else {
+    candidates.push(path.join(os.homedir(), 'Library', 'Huawei', 'sdk'));
+    candidates.push(path.join(os.homedir(), 'Library', 'OpenHarmony', 'Sdk'));
+    candidates.push('/Applications/DevEco-Studio.app/Contents/sdk');
+  }
+  
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      process.env.DEVECO_SDK_HOME = p;
+      log.info(`Auto-detected DEVECO_SDK_HOME: ${p}`);
+      return;
+    }
+  }
+  // Not found, let hvigor handle it (may fail with its own error)
 }
 
 // Get connected devices
@@ -734,6 +865,37 @@ function getBundleName(product = 'default') {
   return match ? match[1] : null;
 }
 
+// Read bundle type from AppScope/app.json5 (e.g. "app", "atomicService")
+function getBundleType() {
+  const appJsonPath = path.join('AppScope', 'app.json5');
+  if (!fs.existsSync(appJsonPath)) return null;
+  
+  const content = fs.readFileSync(appJsonPath, 'utf8');
+  const match = content.match(/"bundleType"\s*:\s*"([^"]+)"/);
+  return match ? match[1] : null;
+}
+
+// Check if installed app's bundleType conflicts with the one being installed
+function checkBundleTypeConflict(device, bundleName, localBundleType) {
+  if (!bundleName || !localBundleType) return false;
+  
+  try {
+    // Use bm dump to check installed app info
+    const result = execSilent(`hdc -t ${device} shell bm dump -n ${bundleName}`);
+    if (!result || result.includes('error')) return false;
+    
+    // Check if the installed type differs
+    const isInstalledAtomicService = result.includes('"atomicService"') || result.includes('bundleType.*atomicService');
+    const isLocalAtomicService = localBundleType === 'atomicService';
+    
+    if ((isInstalledAtomicService && !isLocalAtomicService) || (!isInstalledAtomicService && isLocalAtomicService)) {
+      return true; // type conflict
+    }
+  } catch (e) { /* not installed or query failed, no conflict */ }
+  
+  return false;
+}
+
 // Read ability name from module.json5
 function getAbilityName(module) {
   const moduleJsonPath = path.join(module, 'src', 'main', 'module.json5');
@@ -771,15 +933,26 @@ async function main() {
     process.exit(1);
   }
   
+  // Auto-detect DEVECO_SDK_HOME if not set
+  ensureDevEcoSdkHome();
+  
   // Find hvigor
   const hvigorCmd = findHvigor();
   if (!hvigorCmd) {
     log.error('Cannot find hvigorw build tool');
     log.info('Make sure hvigorw exists in project root or install globally:');
     log.info('  npm install -g @ohos/hvigor-cli');
+    log.info('Or install DevEco Studio which includes hvigorw');
     process.exit(1);
   }
   log.info(`Using build tool: ${hvigorCmd}`);
+  
+  // Detect hvigor version for command compatibility
+  const hvigorVersion = getHvigorVersion();
+  const hvigorV6 = isHvigorV6(hvigorVersion);
+  if (hvigorVersion) {
+    log.info(`Hvigor modelVersion: ${hvigorVersion}${hvigorV6 ? ' (v6+)' : ''}`);
+  }
   
   // Check hdc
   if (!commandExists('hdc')) {
@@ -853,7 +1026,7 @@ async function main() {
       if (modules.length === 0) {
         log.warn('No modules found in build-profile.json5, falling back to single module build');
         log.info(`Building module "${options.module}" (mode: ${options.buildMode})...`);
-        buildCmd = `${hvigorCmd} assembleHap --mode module -p module=${options.module}@default -p product=${options.product} -p buildMode=${options.buildMode} -p debuggable=${debuggable} --no-daemon`;
+        buildCmd = buildCommand(hvigorCmd, 'assembleHap', { module: `${options.module}@default`, product: options.product, buildMode: options.buildMode, debuggable }, hvigorV6);
         log.info(`Executing: ${buildCmd}`);
         
         try {
@@ -881,7 +1054,7 @@ async function main() {
         log.info(`Building all modules (mode: ${options.buildMode})...`);
         
         // Build HAP first
-        buildCmd = `${hvigorCmd} assembleHap --mode module -p product=${options.product} -p buildMode=${options.buildMode} -p debuggable=${debuggable} --no-daemon`;
+        buildCmd = buildCommand(hvigorCmd, 'assembleHap', { product: options.product, buildMode: options.buildMode, debuggable }, hvigorV6);
         log.info(`Executing: ${buildCmd}`);
         
         try {
@@ -894,7 +1067,7 @@ async function main() {
         // Build HSP modules
         const hspModules = buildOrder.filter(m => m.type === 'hsp');
         if (hspModules.length > 0) {
-          const hspCmd = `${hvigorCmd} assembleHsp --mode module -p product=${options.product} -p buildMode=${options.buildMode} -p debuggable=${debuggable} --no-daemon`;
+          const hspCmd = buildCommand(hvigorCmd, 'assembleHsp', { product: options.product, buildMode: options.buildMode, debuggable }, hvigorV6);
           log.info(`Executing: ${hspCmd}`);
           
           try {
@@ -910,7 +1083,7 @@ async function main() {
     } else {
       // 单模块编译
       log.info(`Building module "${options.module}" (mode: ${options.buildMode})...`);
-      buildCmd = `${hvigorCmd} assembleHap --mode module -p module=${options.module}@default -p product=${options.product} -p buildMode=${options.buildMode} -p debuggable=${debuggable} --no-daemon`;
+      buildCmd = buildCommand(hvigorCmd, 'assembleHap', { module: `${options.module}@default`, product: options.product, buildMode: options.buildMode, debuggable }, hvigorV6);
       log.info(`Executing: ${buildCmd}`);
       
       try {
@@ -977,6 +1150,26 @@ async function main() {
   }
   
   // Uninstall existing app before install (if --uninstall flag is set)
+  // Also auto-uninstall if bundleType conflict detected
+  {
+    const bundleName = getBundleName(options.product);
+    const localBundleType = getBundleType();
+    
+    if (bundleName && localBundleType && !options.uninstall) {
+      // Check bundleType conflict (e.g. atomicService vs app)
+      if (checkBundleTypeConflict(device, bundleName, localBundleType)) {
+        log.warn(`Bundle type conflict detected: device has different type than local "${localBundleType}"`);
+        log.info('Auto-uninstalling to resolve type conflict...');
+        try {
+          const result = execSilent(`hdc -t ${device} uninstall ${bundleName}`);
+          if (result.includes('successfully')) {
+            log.success('Uninstall completed (type conflict resolved)');
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  }
+  
   if (options.uninstall) {
     const bundleName = getBundleName(options.product);
     if (bundleName) {
