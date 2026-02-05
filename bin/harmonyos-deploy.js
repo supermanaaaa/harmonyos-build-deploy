@@ -135,6 +135,9 @@ function parseArgs() {
     logOnly: false,  // 仅查看日志，不编译不安装
     logFilter: '',  // 日志过滤 tag
     listDevices: false,  // 列出所有已连接设备
+    appPackage: false,  // APP 打包模式（生成 .app 文件用于上架）
+    outputDir: '',  // 输出目录（将 .app 文件复制到指定目录）
+    outputName: '',  // 自定义输出文件名
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -213,6 +216,18 @@ function parseArgs() {
       case '--list-devices':
         options.listDevices = true;
         break;
+      case '-A':
+      case '--app':
+        options.appPackage = true;
+        break;
+      case '-o':
+      case '--output':
+        options.outputDir = args[++i];
+        break;
+      case '-n':
+      case '--name':
+        options.outputName = args[++i];
+        break;
     }
   }
 
@@ -246,6 +261,9 @@ Options:
       --log                  Show real-time device log after deploy (Ctrl+C to stop)
       --log-only             Only show device log, skip build and install
       --filter <tag>         Filter log by tag (used with --log or --log-only)
+  -A, --app                  APP packaging mode: build .app file for AppGallery (no device install)
+  -o, --output <dir>         Copy .app file to specified directory (used with --app)
+  -n, --name <name>          Custom output filename (used with --app -o), e.g. --name myapp.app
   -h, --help                 Show this help message
 
 Examples:
@@ -263,11 +281,16 @@ Examples:
   npx harmonyos-deploy --log-only                   # Just show device log
   npx harmonyos-deploy --log-only --filter MyTag    # Show log filtered by tag
   npx harmonyos-deploy --list-devices               # List connected devices with info
+  npx harmonyos-deploy --app --release              # Build .app for AppGallery (release)
+  npx harmonyos-deploy --app -p default --release   # Build .app with specific product
+  npx harmonyos-deploy --app -o ./release           # Build .app and copy to directory
+  npx harmonyos-deploy --app -o . -n myapp.app      # Build and save as myapp.app
 
 Note: Use --all for projects with shared libraries/modules.
       Use --product to select environments (test/debug/release) with different signing configs.
       Build modes: debug (debuggable=true), release (debuggable=false), test, or custom.
       Use --debuggable / --no-debuggable to override automatic debuggable detection.
+      Use --app to generate .app file for AppGallery submission (skips device install).
 `);
 }
 
@@ -732,6 +755,106 @@ function buildCommand(hvigorCmd, task, params = {}, hvigorV6 = false) {
   return parts.join(' ');
 }
 
+// Generate assembleApp command for APP packaging (AppGallery submission)
+// APP packaging uses --mode project instead of --mode module
+// Note: APP for AppGallery must use debuggable=false
+function buildAppCommand(hvigorCmd, product = 'default', buildMode = 'release', hvigorV6 = false) {
+  const parts = [hvigorCmd];
+
+  if (hvigorV6) {
+    // Hvigor 6.x: simplified command
+    parts.push('assembleApp');
+    parts.push('--no-daemon');
+  } else {
+    // Hvigor 5.x: full parameter format with --mode project
+    parts.push('--mode project');
+    if (product) {
+      parts.push(`-p product=${product}`);
+    }
+    if (buildMode) {
+      parts.push(`-p buildMode=${buildMode}`);
+    }
+    // APP for AppGallery must be non-debuggable
+    parts.push('-p debuggable=false');
+    parts.push('assembleApp');
+    parts.push('--no-daemon');
+  }
+
+  return parts.join(' ');
+}
+
+// Find .app file in build output directory
+// Search recursively like Jenkins: find files ending with .app, exclude *-unsigned*.app
+function findAppFile(product = 'default') {
+  const searchDirs = [
+    path.join('build', 'outputs', product),
+    path.join('build', 'outputs', 'default'),
+    'build',  // fallback: search entire build directory
+  ];
+
+  // Helper: recursively find .app files
+  function findAppFilesRecursive(dir, depth = 0) {
+    if (depth > 5 || !fs.existsSync(dir)) return [];
+    const results = [];
+
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isFile() && entry.name.endsWith('.app')) {
+          // Exclude unsigned files (like Jenkins does)
+          if (!entry.name.includes('-unsigned')) {
+            results.push({
+              path: fullPath,
+              signed: !entry.name.includes('unsigned'),
+              fileName: entry.name
+            });
+          }
+        } else if (entry.isDirectory() && entry.name !== 'node_modules' && entry.name !== 'oh_modules') {
+          results.push(...findAppFilesRecursive(fullPath, depth + 1));
+        }
+      }
+    } catch (e) { /* skip */ }
+
+    return results;
+  }
+
+  // Search in order of preference
+  for (const searchDir of searchDirs) {
+    const appFiles = findAppFilesRecursive(searchDir);
+
+    if (appFiles.length > 0) {
+      // Prefer signed files, then by path containing product name
+      appFiles.sort((a, b) => {
+        // Signed files first
+        if (a.signed && !b.signed) return -1;
+        if (!a.signed && b.signed) return 1;
+        // Files with product name in path
+        const aHasProduct = a.path.includes(product);
+        const bHasProduct = b.path.includes(product);
+        if (aHasProduct && !bHasProduct) return -1;
+        if (!aHasProduct && bHasProduct) return 1;
+        return 0;
+      });
+
+      return appFiles[0];
+    }
+  }
+
+  return null;
+}
+
+// Format file size for display (KB/MB)
+function formatFileSize(bytes) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  } else if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(2)} KB`;
+  } else {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+}
+
 // Execute command and return output silently
 function execSilent(cmd) {
   try {
@@ -1186,7 +1309,143 @@ async function main() {
     await startLogStream(device, bundleName, options.logFilter);
     return;
   }
-  
+
+  // --app: APP packaging mode for AppGallery submission
+  if (options.appPackage) {
+    console.log('');
+    log.info('=== APP Packaging Mode (for AppGallery) ===');
+    console.log('');
+
+    // Performance timer
+    const timer = createTimer();
+
+    log.info(`Working directory: ${process.cwd()}`);
+
+    // Check if HarmonyOS project
+    if (!fs.existsSync('build-profile.json5')) {
+      log.error('Not a valid HarmonyOS project (missing build-profile.json5)');
+      process.exit(1);
+    }
+
+    // Auto-detect DEVECO_SDK_HOME if not set
+    ensureDevEcoSdkHome();
+
+    // Find hvigor
+    const hvigorCmd = findHvigor();
+    if (!hvigorCmd) {
+      log.error('Cannot find hvigorw build tool');
+      log.info('Make sure hvigorw exists in project root or install globally');
+      process.exit(1);
+    }
+    log.info(`Using build tool: ${hvigorCmd}`);
+
+    // Detect hvigor version
+    const hvigorVersion = getHvigorVersion();
+    const hvigorV6 = isHvigorV6(hvigorVersion);
+    if (hvigorVersion) {
+      log.info(`Hvigor modelVersion: ${hvigorVersion}${hvigorV6 ? ' (v6+)' : ''}`);
+    }
+
+    // APP packaging typically uses release mode
+    const buildMode = options.buildMode;
+    log.info(`Building APP package (product: ${options.product}, mode: ${buildMode})...`);
+    console.log('');
+
+    // Install dependencies first
+    timer.start('Dependencies');
+    log.info('Installing dependencies (ohpm install)...');
+    try {
+      exec('ohpm install', { silent: false });
+      log.success('Dependencies installed');
+    } catch (error) {
+      log.warn('ohpm install failed, continuing anyway...');
+    }
+    console.log('');
+
+    // Build APP
+    timer.start('Build APP');
+    const appCmd = buildAppCommand(hvigorCmd, options.product, buildMode, hvigorV6);
+    log.info(`Executing: ${appCmd}`);
+
+    try {
+      exec(appCmd);
+    } catch (error) {
+      log.error('APP build failed');
+      diagnoseBuildError(error.stderr || error.stdout || error.message);
+      process.exit(1);
+    }
+
+    // Find the generated .app file
+    const appFile = findAppFile(options.product);
+    if (!appFile) {
+      log.error(`Cannot find .app file for product "${options.product}"`);
+      log.info(`Expected path: build/outputs/${options.product}/*.app`);
+      process.exit(1);
+    }
+
+    // Get file size
+    const stats = fs.statSync(appFile.path);
+    const fileSize = formatFileSize(stats.size);
+
+    // Performance summary
+    timer.summary();
+
+    // Success output
+    console.log('');
+    log.success('=== APP Package Generated ===');
+    console.log('');
+    console.log(`  File:     ${appFile.path}`);
+    console.log(`  Size:     ${fileSize}`);
+    console.log(`  Signed:   ${appFile.signed ? 'Yes' : 'No'}`);
+    console.log(`  Product:  ${options.product}`);
+    console.log(`  Mode:     ${buildMode}`);
+    console.log('');
+
+    // Copy to output directory if specified
+    if (options.outputDir) {
+      const outputDir = path.resolve(options.outputDir);
+
+      // Create output directory if it doesn't exist
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+        log.info(`Created output directory: ${outputDir}`);
+      }
+
+      // Determine output filename:
+      // 1. User specified --name: use it directly
+      // 2. Otherwise: use {product}_{YYYYMMDD_HHmmss}.app format
+      let outputFileName;
+      if (options.outputName) {
+        outputFileName = options.outputName.endsWith('.app') ? options.outputName : `${options.outputName}.app`;
+      } else {
+        // Generate timestamp: YYYYMMDD_HHmmss
+        const now = new Date();
+        const timestamp = now.getFullYear().toString() +
+          String(now.getMonth() + 1).padStart(2, '0') +
+          String(now.getDate()).padStart(2, '0') + '_' +
+          String(now.getHours()).padStart(2, '0') +
+          String(now.getMinutes()).padStart(2, '0') +
+          String(now.getSeconds()).padStart(2, '0');
+        outputFileName = `${options.product}_${timestamp}.app`;
+      }
+
+      const destPath = path.join(outputDir, outputFileName);
+      fs.copyFileSync(appFile.path, destPath);
+      log.success(`Copied to: ${destPath}`);
+      console.log('');
+    }
+
+    log.success('Ready for AppGallery submission!');
+    console.log('');
+    log.info('Next steps:');
+    console.log('  1. Login to AppGallery Connect (https://developer.huawei.com/consumer/cn/service/josp/agc/index.html)');
+    console.log('  2. My Apps -> Upload the .app file');
+    console.log('  3. Complete app information and submit for review');
+    console.log('');
+
+    return;
+  }
+
   // Performance timer
   const timer = createTimer();
   

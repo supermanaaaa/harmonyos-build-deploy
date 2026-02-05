@@ -4,7 +4,8 @@ description: >
   鸿蒙 HarmonyOS 应用自动编译、签名并部署到真机。当用户需要：(1) 编译鸿蒙项目生成 HAP/HSP 包，
   (2) 将应用安装到真机设备，(3) 一键编译+安装+启动，(4) 查看连接的鸿蒙设备，(5) 多模块项目依赖解析与全量编译，
   (6) 切换 product 构建变体（如测试/正式环境），(7) 切换 buildMode（debug/release/test/自定义），
-  (8) 查看设备实时日志，或提到 hvigor、hvigorw、hdc、HAP、HSP、bm install、ohpm、hilog 等关键词时触发。
+  (8) 查看设备实时日志，(9) 打包生成 .app 文件用于上架 AppGallery，
+  或提到 hvigor、hvigorw、hdc、HAP、HSP、APP、bm install、ohpm、hilog、AppGallery 等关键词时触发。
   也适用于用户需要修改、扩展或调试此部署脚本本身的场景。
 ---
 
@@ -30,6 +31,7 @@ npx harmonyos-deploy --all --launch           # Build all + install + launch
 npx harmonyos-deploy --all --release --launch # Release mode
 npx harmonyos-deploy --all --skip-build       # Install existing build
 npx harmonyos-deploy --log-only               # View device logs only
+npx harmonyos-deploy --app --release          # Build .app for AppGallery
 ```
 
 ## Full CLI Reference
@@ -76,6 +78,22 @@ debuggable auto-detection: release → false, others → true. Override with `--
 | `--log-only` | Only show device log, skip build and install |
 | `--filter <tag>` | Filter log by tag (used with --log or --log-only) |
 
+### APP Packaging (AppGallery)
+| Flag | Description |
+|------|-------------|
+| `-A, --app` | APP packaging mode: build .app file for AppGallery (no device install) |
+| `-o, --output <dir>` | Copy .app file to specified directory |
+| `-n, --name <name>` | Custom output filename (e.g. `--name myapp.app`) |
+
+```bash
+npx harmonyos-deploy --app --release              # Build release .app
+npx harmonyos-deploy --app -p default --release   # With specific product
+npx harmonyos-deploy --app -o ./release           # Copy to output directory (auto-named: {product}_{timestamp}.app)
+npx harmonyos-deploy --app -o . -n myapp.app      # Custom output filename
+```
+
+APP packaging uses `assembleApp` (project mode) with `debuggable=false`. Output: `build/outputs/{product}/*.app`
+
 ## Build Workflow
 
 1. **Environment** — Find hvigorw/hvigor, detect hdc-connected devices
@@ -94,16 +112,28 @@ With `--skip-build`, the script reads compiler-generated `BuildProfile.ets` to e
 ## Build Command Format
 
 ```
+# HAP/HSP/HAR (module mode - for device install)
 hvigorw assembleHap --mode module -p module={name}@default -p product={product} -p buildMode={mode} -p debuggable={bool} --no-daemon
+
+# APP (project mode - for AppGallery, always debuggable=false)
+hvigorw --mode project -p product={product} -p buildMode={mode} -p debuggable=false assembleApp --no-daemon
 ```
 HSP uses `assembleHsp`, HAR uses `assembleHar`.
 
 ## Output Path
 
 ```
+# HAP/HSP (module output)
 {module}/build/{product}/outputs/default/
 ├── {module}-default-signed.hap   # Signed HAP
 └── {module}-default-signed.hsp   # Signed HSP
+
+# APP (project output - for AppGallery)
+build/outputs/{product}/
+└── {AppName}-{product}_{version}_{timestamp}.app
+
+# With -o option (auto-named)
+{outputDir}/{product}_{YYYYMMDD_HHmmss}.app
 ```
 
 Third-party HSPs: `build/cache/{product}/remote_hsp/`
@@ -136,12 +166,15 @@ The app was running during installation. The script now auto force-stops before 
 
 ## Modifying the Script
 
-Single-file Node.js (~1750 lines), no external dependencies. Key functions:
+Single-file Node.js (~1900 lines), no external dependencies. Key functions:
 - `parseArgs()` — CLI argument parsing
 - `findAllModules()` — Module scanning
 - `getModuleBuildOrder()` — Topological sort
 - `findPackageFile()` — Artifact discovery
 - `detectBuildProfile()` — Extract build metadata from BuildProfile.ets
 - `getBundleName()` — Read bundleName from config
+- `buildAppCommand()` — Generate assembleApp command for APP packaging
+- `findAppFile()` — Locate .app file in build output (recursive, excludes unsigned)
+- `formatFileSize()` — Format bytes to KB/MB for display
 
 To add a new flag: update `parseArgs()` switch-case + options defaults + `showHelp()` text.
