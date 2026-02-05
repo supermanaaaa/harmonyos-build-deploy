@@ -4,7 +4,7 @@ description: >
   鸿蒙 HarmonyOS 应用自动编译、签名并部署到真机。当用户需要：(1) 编译鸿蒙项目生成 HAP/HSP 包，
   (2) 将应用安装到真机设备，(3) 一键编译+安装+启动，(4) 查看连接的鸿蒙设备，(5) 多模块项目依赖解析与全量编译，
   (6) 切换 product 构建变体（如测试/正式环境），(7) 切换 buildMode（debug/release/test/自定义），
-  或提到 hvigor、hvigorw、hdc、HAP、HSP、bm install、ohpm 等关键词时触发。
+  (8) 查看设备实时日志，或提到 hvigor、hvigorw、hdc、HAP、HSP、bm install、ohpm、hilog 等关键词时触发。
   也适用于用户需要修改、扩展或调试此部署脚本本身的场景。
 ---
 
@@ -23,12 +23,13 @@ description: >
 
 ## Quick Start
 
-Copy `bin/harmonyos-deploy.js` to your HarmonyOS project root, then:
+在鸿蒙项目根目录运行：
 
 ```bash
-node harmonyos-deploy.js --all --launch          # Build all + install + launch
-node harmonyos-deploy.js --all --release --launch # Release mode
-node harmonyos-deploy.js --all --skip-build       # Install existing build
+npx harmonyos-deploy --all --launch           # Build all + install + launch
+npx harmonyos-deploy --all --release --launch # Release mode
+npx harmonyos-deploy --all --skip-build       # Install existing build
+npx harmonyos-deploy --log-only               # View device logs only
 ```
 
 ## Full CLI Reference
@@ -62,10 +63,18 @@ debuggable auto-detection: release → false, others → true. Override with `--
 | Flag | Description |
 |------|-------------|
 | `-d, --device <id>` | Target device ID (auto-select if omitted) |
+| `--list-devices` | List all connected devices with details |
 | `-s, --skip-build` | Skip build, install existing packages |
 | `-l, --launch` | Launch app after installation |
 | `-u, --uninstall` | Uninstall existing app before install |
 | `-c, --clean` | Clean before build |
+
+### Debugging & Logging
+| Flag | Description |
+|------|-------------|
+| `--log` | Show real-time device log after deploy (Ctrl+C to stop) |
+| `--log-only` | Only show device log, skip build and install |
+| `--filter <tag>` | Filter log by tag (used with --log or --log-only) |
 
 ## Build Workflow
 
@@ -127,7 +136,7 @@ The app was running during installation. The script now auto force-stops before 
 
 ## Modifying the Script
 
-Single-file Node.js (~1287 lines), no external dependencies. Key functions:
+Single-file Node.js (~1750 lines), no external dependencies. Key functions:
 - `parseArgs()` — CLI argument parsing
 - `findAllModules()` — Module scanning
 - `getModuleBuildOrder()` — Topological sort
