@@ -42,9 +42,19 @@ function diagnoseBuildError(errorOutput) {
   
   // Hvigor version mismatch
   if (errStr.includes('Unsupported modelVersion')) {
+    const versionMatch = errStr.match(/modelVersion[^\d]*(\d+\.\d+\.\d+)/);
+    const projectVersion = versionMatch ? versionMatch[1] : getHvigorVersion();
     diagnostics.push({
-      issue: 'Hvigor version mismatch',
-      fix: 'Use DevEco Studio built-in hvigorw, or update hvigor-config.json5 modelVersion',
+      issue: `Hvigor version mismatch${projectVersion ? ` (project requires ${projectVersion})` : ''}`,
+      fix: 'Run: npx harmonyos-deploy --auto-fix-version\n     Or manually update modelVersion in hvigor-config.json5 and all oh-package.json5 files',
+    });
+  }
+
+  // modelVersion inconsistent
+  if (errStr.includes('modelVersion inconsistent') || errStr.includes('modelVersion') && errStr.includes('inconsistent')) {
+    diagnostics.push({
+      issue: 'modelVersion inconsistent across config files',
+      fix: 'Run: npx harmonyos-deploy --auto-fix-version\n     This will synchronize modelVersion in hvigor-config.json5 and all oh-package.json5 files',
     });
   }
   
@@ -64,11 +74,15 @@ function diagnoseBuildError(errorOutput) {
     });
   }
   
-  // SDK version
-  if (errStr.includes('compileSdkVersion') || errStr.includes('compatibleSdkVersion')) {
+  // SDK version / targetSdkVersion
+  if (errStr.includes('compileSdkVersion') || errStr.includes('compatibleSdkVersion') || errStr.includes('targetSdkVersion') || errStr.includes('Unable to find targetSdkVersion')) {
+    const localSdkVersions = getLocalSdkVersions();
+    const availableStr = localSdkVersions.length > 0
+      ? `\n     Local SDK versions: ${localSdkVersions.map(v => v.version).join(', ')}`
+      : '';
     diagnostics.push({
       issue: 'SDK version mismatch',
-      fix: 'Check compileSdkVersion in build-profile.json5 matches your installed SDK',
+      fix: `Run: npx harmonyos-deploy --auto-fix-version${availableStr}\n     Or manually update targetSdkVersion/compatibleSdkVersion in build-profile.json5`,
     });
   }
   
@@ -138,6 +152,9 @@ function parseArgs() {
     appPackage: false,  // APP 打包模式（生成 .app 文件用于上架）
     outputDir: '',  // 输出目录（将 .app 文件复制到指定目录）
     outputName: '',  // 自定义输出文件名
+    check: false,  // 构建前预检
+    autoFixVersion: false,  // 自动修复版本不匹配
+    devecoPath: '',  // 手动指定 DevEco Studio 路径
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -228,6 +245,15 @@ function parseArgs() {
       case '--name':
         options.outputName = args[++i];
         break;
+      case '--check':
+        options.check = true;
+        break;
+      case '--auto-fix-version':
+        options.autoFixVersion = true;
+        break;
+      case '--deveco-path':
+        options.devecoPath = args[++i];
+        break;
     }
   }
 
@@ -264,6 +290,9 @@ Options:
   -A, --app                  APP packaging mode: build .app file for AppGallery (no device install)
   -o, --output <dir>         Copy .app file to specified directory (used with --app)
   -n, --name <name>          Custom output filename (used with --app -o), e.g. --name myapp.app
+      --check                Pre-flight check: verify environment, tools, versions, and device
+      --auto-fix-version     Auto-fix version mismatches (modelVersion, targetSdkVersion)
+      --deveco-path <path>   Specify DevEco Studio installation path
   -h, --help                 Show this help message
 
 Examples:
@@ -285,6 +314,8 @@ Examples:
   npx harmonyos-deploy --app -p default --release   # Build .app with specific product
   npx harmonyos-deploy --app -o ./release           # Build .app and copy to directory
   npx harmonyos-deploy --app -o . -n myapp.app      # Build and save as myapp.app
+  npx harmonyos-deploy --check                      # Pre-flight environment check
+  npx harmonyos-deploy --auto-fix-version           # Auto-fix version mismatches
 
 Note: Use --all for projects with shared libraries/modules.
       Use --product to select environments (test/debug/release) with different signing configs.
@@ -876,10 +907,28 @@ function commandExists(cmd) {
 }
 
 // Find hvigor command
-// Priority: project local → DevEco Studio built-in → global
-function findHvigor() {
+// Priority: --deveco-path → project local → DevEco Studio built-in (best match) → global
+function findHvigor(devecoPath) {
   const isWindows = os.platform() === 'win32';
-  
+
+  // 0. User-specified DevEco Studio path (--deveco-path)
+  if (devecoPath) {
+    const hvigorBin = isWindows ? 'hvigorw.bat' : 'hvigorw';
+    // Try direct path: {devecoPath}/tools/hvigor/bin/hvigorw
+    const directPath = path.join(devecoPath, 'tools', 'hvigor', 'bin', hvigorBin);
+    if (fs.existsSync(directPath)) {
+      log.info(`Using specified DevEco Studio hvigorw: ${directPath}`);
+      return `"${directPath}"`;
+    }
+    // Try: {devecoPath}/DevEco Studio/tools/hvigor/bin/hvigorw
+    const nestedPath = path.join(devecoPath, 'DevEco Studio', 'tools', 'hvigor', 'bin', hvigorBin);
+    if (fs.existsSync(nestedPath)) {
+      log.info(`Using specified DevEco Studio hvigorw: ${nestedPath}`);
+      return `"${nestedPath}"`;
+    }
+    log.warn(`--deveco-path specified but hvigorw not found at: ${devecoPath}`);
+  }
+
   // 1. Check local hvigorw (project root)
   if (isWindows && fs.existsSync('hvigorw.bat')) {
     return '.\\hvigorw.bat';
@@ -887,28 +936,62 @@ function findHvigor() {
   if (!isWindows && fs.existsSync('hvigorw')) {
     return './hvigorw';
   }
-  
-  // 2. Check DevEco Studio built-in hvigorw
+
+  // 2. Check DevEco Studio built-in hvigorw (with smart version matching)
   if (isWindows) {
+    const projectModelVersion = getHvigorVersion();
+    const candidates = [];
     const programFiles = [
       process.env['ProgramFiles'] || 'C:\\Program Files',
       process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
     ];
     for (const pf of programFiles) {
       try {
-        // Scan for DevEco Studio installations (e.g. "DevEco Studio6.0.1", "DevEco Studio")
         const entries = fs.readdirSync(path.join(pf, 'Huawei')).filter(d => d.startsWith('DevEco'));
-        for (const deveco of entries.sort().reverse()) { // prefer latest version
+        for (const deveco of entries) {
           const hvigorPath = path.join(pf, 'Huawei', deveco, 'DevEco Studio', 'tools', 'hvigor', 'bin', 'hvigorw.bat');
           if (fs.existsSync(hvigorPath)) {
-            log.info(`Found DevEco Studio hvigorw: ${hvigorPath}`);
-            return `"${hvigorPath}"`;
+            // Try to extract version from directory name (e.g. "DevEco Studio6.0.1" → "6.0.1")
+            const versionMatch = deveco.match(/(\d+\.\d+\.\d+)/);
+            candidates.push({
+              path: hvigorPath,
+              dirName: deveco,
+              version: versionMatch ? versionMatch[1] : null,
+            });
           }
         }
       } catch (e) { /* scan error, continue */ }
     }
+
+    if (candidates.length > 0) {
+      let selected = candidates[0];
+
+      if (candidates.length > 1 && projectModelVersion) {
+        // Try to find best match for project modelVersion
+        const projectMajorMinor = projectModelVersion.split('.').slice(0, 2).join('.');
+        const exactMatch = candidates.find(c => c.version && c.version === projectModelVersion);
+        const majorMinorMatch = candidates.find(c => c.version && c.version.startsWith(projectMajorMinor));
+
+        if (exactMatch) {
+          selected = exactMatch;
+        } else if (majorMinorMatch) {
+          selected = majorMinorMatch;
+        } else {
+          // Fallback: prefer latest version
+          candidates.sort((a, b) => (b.version || '').localeCompare(a.version || ''));
+          selected = candidates[0];
+        }
+
+        log.info(`Found ${candidates.length} DevEco Studio installation(s): ${candidates.map(c => c.dirName).join(', ')}`);
+        log.info(`Selected: ${selected.dirName}${projectModelVersion ? ` (project modelVersion: ${projectModelVersion})` : ''}`);
+      } else {
+        log.info(`Found DevEco Studio hvigorw: ${selected.path}`);
+      }
+
+      return `"${selected.path}"`;
+    }
   } else {
-    // macOS: /Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw
+    // macOS
     const macPaths = [
       '/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw',
     ];
@@ -919,12 +1002,12 @@ function findHvigor() {
       }
     }
   }
-  
+
   // 3. Check global hvigorw
   if (commandExists('hvigorw')) {
     return 'hvigorw';
   }
-  
+
   return null;
 }
 
@@ -943,6 +1026,433 @@ function getHvigorVersion() {
     } catch (e) { /* ignore */ }
   }
   return null;
+}
+
+// Scan local SDK directory for installed API versions
+function getLocalSdkVersions() {
+  const versions = [];
+  const sdkHome = process.env.DEVECO_SDK_HOME;
+
+  // 1. Scan DEVECO_SDK_HOME (DevEco Studio built-in SDK)
+  // Structure: sdk/default/sdk-pkg.json with apiVersion, platformVersion
+  if (sdkHome && fs.existsSync(sdkHome)) {
+    try {
+      const subDirs = fs.readdirSync(sdkHome).filter(d => {
+        try { return fs.statSync(path.join(sdkHome, d)).isDirectory(); } catch { return false; }
+      });
+      for (const sub of subDirs) {
+        const sdkPkgPath = path.join(sdkHome, sub, 'sdk-pkg.json');
+        if (fs.existsSync(sdkPkgPath)) {
+          try {
+            const pkg = JSON.parse(fs.readFileSync(sdkPkgPath, 'utf8'));
+            if (pkg.data) {
+              const api = parseInt(pkg.data.apiVersion, 10) || null;
+              const platformVersion = pkg.data.platformVersion || '';
+              // Format as "6.0.1(21)" to match build-profile.json5 targetSdkVersion format
+              const versionStr = api ? `${platformVersion}(${api})` : platformVersion;
+              versions.push({
+                version: versionStr,
+                platformVersion,
+                api,
+                platform: pkg.data.displayName || sub,
+                path: path.join(sdkHome, sub),
+              });
+            }
+          } catch { /* ignore parse errors */ }
+        }
+
+        // Also check for version-numbered subdirectories (e.g. sdk/HarmonyOS-NEXT/6.0.1(21)/)
+        try {
+          const versionDirs = fs.readdirSync(path.join(sdkHome, sub)).filter(d => {
+            const apiMatch = d.match(/\((\d+)\)/);
+            return apiMatch && fs.statSync(path.join(sdkHome, sub, d)).isDirectory();
+          });
+          for (const ver of versionDirs) {
+            const apiMatch = ver.match(/\((\d+)\)/);
+            if (apiMatch && !versions.some(v => v.version === ver)) {
+              versions.push({
+                version: ver,
+                api: parseInt(apiMatch[1], 10),
+                platform: sub,
+                path: path.join(sdkHome, sub, ver),
+              });
+            }
+          }
+        } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 2. Scan OpenHarmony SDK (user-level)
+  const ohSdkPaths = os.platform() === 'win32'
+    ? [path.join(os.homedir(), 'AppData', 'Local', 'OpenHarmony', 'Sdk')]
+    : [path.join(os.homedir(), 'Library', 'OpenHarmony', 'Sdk')];
+  for (const ohSdk of ohSdkPaths) {
+    if (!fs.existsSync(ohSdk)) continue;
+    try {
+      const dirs = fs.readdirSync(ohSdk).filter(d => {
+        return /^\d+$/.test(d) && fs.statSync(path.join(ohSdk, d)).isDirectory();
+      });
+      for (const apiDir of dirs) {
+        const api = parseInt(apiDir, 10);
+        if (!versions.some(v => v.api === api)) {
+          versions.push({
+            version: `OpenHarmony API ${api}`,
+            api,
+            platform: 'OpenHarmony',
+            path: path.join(ohSdk, apiDir),
+          });
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Sort by API version descending (latest first)
+  versions.sort((a, b) => (b.api || 0) - (a.api || 0));
+  return versions;
+}
+
+// Collect all oh-package.json5 modelVersion entries across the project
+function collectModelVersions() {
+  const entries = [];
+  // Root oh-package.json5
+  const rootOhPkg = path.join('oh-package.json5');
+  if (fs.existsSync(rootOhPkg)) {
+    try {
+      const content = fs.readFileSync(rootOhPkg, 'utf8');
+      const match = content.match(/["']?modelVersion["']?\s*:\s*["']([^"']+)["']/);
+      if (match) entries.push({ file: rootOhPkg, version: match[1] });
+    } catch { /* ignore */ }
+  }
+  // hvigor-config.json5
+  const hvigorConfig = path.join('hvigor', 'hvigor-config.json5');
+  if (fs.existsSync(hvigorConfig)) {
+    try {
+      const content = fs.readFileSync(hvigorConfig, 'utf8');
+      const match = content.match(/["']?modelVersion["']?\s*:\s*["']([^"']+)["']/);
+      if (match) entries.push({ file: hvigorConfig, version: match[1] });
+    } catch { /* ignore */ }
+  }
+  // Scan module oh-package.json5 files
+  const modules = findAllModulesQuiet();
+  for (const mod of modules) {
+    const modOhPkg = path.join(mod.path, 'oh-package.json5');
+    if (fs.existsSync(modOhPkg)) {
+      try {
+        const content = fs.readFileSync(modOhPkg, 'utf8');
+        const match = content.match(/["']?modelVersion["']?\s*:\s*["']([^"']+)["']/);
+        if (match) entries.push({ file: modOhPkg, version: match[1] });
+      } catch { /* ignore */ }
+    }
+  }
+  return entries;
+}
+
+// Silent version of findAllModules (no log output)
+function findAllModulesQuiet() {
+  const modules = [];
+  const visited = new Set();
+  function scan(dir, depth = 0) {
+    if (depth > 5 || visited.has(dir)) return;
+    visited.add(dir);
+    const ohPkgPath = path.join(dir, 'oh-package.json5');
+    if (fs.existsSync(ohPkgPath)) {
+      const hasSrcDir = fs.existsSync(path.join(dir, 'src'));
+      const isRoot = dir === '.';
+      if (!isRoot && hasSrcDir) {
+        const modName = path.basename(dir);
+        modules.push({ name: modName, path: dir });
+      }
+    }
+    if (fs.existsSync(dir)) {
+      try {
+        const entries = fs.readdirSync(dir);
+        for (const entry of entries) {
+          if (entry.startsWith('.') || ['node_modules', 'build', 'oh_modules', 'AppScope', 'hvigor', 'libs'].includes(entry)) continue;
+          try {
+            const fullPath = path.join(dir, entry);
+            if (fs.statSync(fullPath).isDirectory()) scan(fullPath, depth + 1);
+          } catch { /* skip */ }
+        }
+      } catch { /* skip */ }
+    }
+  }
+  scan('.');
+  return modules;
+}
+
+// Check version compatibility and return issues found
+function checkVersionCompatibility() {
+  const issues = [];
+
+  // 1. Check modelVersion consistency across all config files
+  const modelVersions = collectModelVersions();
+  if (modelVersions.length > 0) {
+    const uniqueVersions = [...new Set(modelVersions.map(e => e.version))];
+    if (uniqueVersions.length > 1) {
+      issues.push({
+        type: 'modelVersion_inconsistent',
+        message: 'modelVersion is inconsistent across config files',
+        details: modelVersions.map(e => `  - ${e.file}: ${e.version}`).join('\n'),
+        files: modelVersions,
+      });
+    }
+  }
+
+  // 2. Check targetSdkVersion against installed SDKs
+  const buildProfile = parseJson5('build-profile.json5');
+  if (buildProfile && buildProfile.app && Array.isArray(buildProfile.app.products)) {
+    const localSdkVersions = getLocalSdkVersions();
+    const localVersionStrings = localSdkVersions.map(v => v.version);
+
+    for (const product of buildProfile.app.products) {
+      if (product.targetSdkVersion) {
+        const found = localVersionStrings.some(v => v === product.targetSdkVersion);
+        if (!found && localSdkVersions.length > 0) {
+          issues.push({
+            type: 'targetSdkVersion_missing',
+            message: `targetSdkVersion "${product.targetSdkVersion}" not found in local SDK`,
+            product: product.name,
+            target: product.targetSdkVersion,
+            available: localVersionStrings,
+          });
+        }
+      }
+      if (product.compatibleSdkVersion) {
+        const found = localVersionStrings.some(v => v === product.compatibleSdkVersion);
+        if (!found && localSdkVersions.length > 0) {
+          issues.push({
+            type: 'compatibleSdkVersion_missing',
+            message: `compatibleSdkVersion "${product.compatibleSdkVersion}" not found in local SDK`,
+            product: product.name,
+            target: product.compatibleSdkVersion,
+            available: localVersionStrings,
+          });
+        }
+      }
+    }
+  }
+
+  return issues;
+}
+
+// Display version compatibility issues with actionable fix suggestions
+function showVersionIssues(issues) {
+  if (issues.length === 0) return;
+
+  console.log('');
+  log.warn('Version compatibility issues detected:');
+  console.log('');
+
+  for (let i = 0; i < issues.length; i++) {
+    const issue = issues[i];
+    console.log(`  ${i + 1}. ${colors.yellow}${issue.message}${colors.reset}`);
+
+    if (issue.type === 'modelVersion_inconsistent') {
+      console.log(issue.details);
+      console.log(`     ${colors.cyan}→ Fix: Run with --auto-fix-version to synchronize all modelVersion values${colors.reset}`);
+    } else if (issue.type === 'targetSdkVersion_missing' || issue.type === 'compatibleSdkVersion_missing') {
+      if (issue.available && issue.available.length > 0) {
+        console.log(`     Local SDK versions: ${issue.available.join(', ')}`);
+      }
+      console.log(`     ${colors.cyan}→ Fix: Run with --auto-fix-version to update to a locally available version${colors.reset}`);
+    }
+    console.log('');
+  }
+}
+
+// Auto-fix version mismatches by aligning project config to local environment
+function autoFixVersions() {
+  log.info('Auto-fixing version configuration...');
+  console.log('');
+  let fixCount = 0;
+
+  // 1. Determine target modelVersion from hvigor-config.json5 or the most common value
+  const modelVersions = collectModelVersions();
+  if (modelVersions.length > 0) {
+    // Use hvigor-config.json5 version as the authoritative source
+    const hvigorConfigEntry = modelVersions.find(e => e.file.includes('hvigor-config.json5'));
+    const targetModelVersion = hvigorConfigEntry ? hvigorConfigEntry.version : modelVersions[0].version;
+
+    // Fix all files that don't match
+    for (const entry of modelVersions) {
+      if (entry.version !== targetModelVersion) {
+        try {
+          let content = fs.readFileSync(entry.file, 'utf8');
+          content = content.replace(
+            /(["']?modelVersion["']?\s*:\s*["'])[^"']+(['"])/,
+            `$1${targetModelVersion}$2`
+          );
+          fs.writeFileSync(entry.file, content, 'utf8');
+          log.success(`Fixed modelVersion in ${entry.file}: ${entry.version} → ${targetModelVersion}`);
+          fixCount++;
+        } catch (e) {
+          log.error(`Failed to fix ${entry.file}: ${e.message}`);
+        }
+      }
+    }
+    if (fixCount === 0 && modelVersions.length > 1) {
+      log.info('modelVersion is already consistent across all files');
+    }
+  }
+
+  // 2. Fix targetSdkVersion / compatibleSdkVersion if local SDK available
+  const localSdkVersions = getLocalSdkVersions();
+  if (localSdkVersions.length > 0) {
+    const bestLocalVersion = localSdkVersions[0].version; // highest API version
+
+    const buildProfilePath = 'build-profile.json5';
+    if (fs.existsSync(buildProfilePath)) {
+      try {
+        let content = fs.readFileSync(buildProfilePath, 'utf8');
+        let modified = false;
+
+        // Fix targetSdkVersion
+        const targetMatch = content.match(/(["']?targetSdkVersion["']?\s*:\s*["'])([^"']+)(['"])/);
+        if (targetMatch) {
+          const currentTarget = targetMatch[2];
+          const localVersionStrings = localSdkVersions.map(v => v.version);
+          if (!localVersionStrings.includes(currentTarget)) {
+            content = content.replace(
+              /(["']?targetSdkVersion["']?\s*:\s*["'])[^"']+(['"])/g,
+              `$1${bestLocalVersion}$2`
+            );
+            log.success(`Fixed targetSdkVersion in ${buildProfilePath}: ${currentTarget} → ${bestLocalVersion}`);
+            modified = true;
+            fixCount++;
+          }
+        }
+
+        // Fix compatibleSdkVersion
+        const compatMatch = content.match(/(["']?compatibleSdkVersion["']?\s*:\s*["'])([^"']+)(['"])/);
+        if (compatMatch) {
+          const currentCompat = compatMatch[2];
+          const localVersionStrings = localSdkVersions.map(v => v.version);
+          if (!localVersionStrings.includes(currentCompat)) {
+            content = content.replace(
+              /(["']?compatibleSdkVersion["']?\s*:\s*["'])[^"']+(['"])/g,
+              `$1${bestLocalVersion}$2`
+            );
+            log.success(`Fixed compatibleSdkVersion in ${buildProfilePath}: ${currentCompat} → ${bestLocalVersion}`);
+            modified = true;
+            fixCount++;
+          }
+        }
+
+        if (modified) {
+          fs.writeFileSync(buildProfilePath, content, 'utf8');
+        }
+      } catch (e) {
+        log.error(`Failed to fix ${buildProfilePath}: ${e.message}`);
+      }
+    }
+  }
+
+  console.log('');
+  if (fixCount > 0) {
+    log.success(`Fixed ${fixCount} version issue(s). You can now build the project.`);
+  } else {
+    log.info('No version issues to fix.');
+  }
+}
+
+// Pre-flight environment check
+function runPreflightCheck() {
+  console.log('');
+  log.info('=== Pre-flight Environment Check ===');
+  console.log('');
+
+  let hasErrors = false;
+  const check = (label, status, detail) => {
+    const icon = status ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
+    console.log(`  [CHECK] ${label.padEnd(35)} ${icon}  ${detail || ''}`);
+    if (!status) hasErrors = true;
+  };
+
+  // Node.js
+  check('Node.js', true, process.version);
+
+  // DevEco Studio
+  ensureDevEcoSdkHome();
+  const sdkHome = process.env.DEVECO_SDK_HOME;
+  check('DEVECO_SDK_HOME', !!sdkHome, sdkHome || 'Not found');
+
+  // hvigorw
+  const hvigorCmd = findHvigor();
+  const hvigorVersion = getHvigorVersion();
+  check('hvigorw', !!hvigorCmd, hvigorCmd ? `${hvigorCmd}${hvigorVersion ? ` (modelVersion ${hvigorVersion})` : ''}` : 'Not found');
+
+  // hdc
+  const hdcFound = commandExists('hdc');
+  check('hdc', hdcFound, hdcFound ? 'found' : 'Not found - add HarmonyOS SDK toolchains to PATH');
+
+  // ohpm
+  const ohpmFound = commandExists('ohpm');
+  check('ohpm', ohpmFound, ohpmFound ? 'found' : 'Not found');
+
+  // Devices
+  if (hdcFound) {
+    const devices = getDevices();
+    if (devices.length > 0) {
+      for (const d of devices) {
+        const info = getDeviceInfo(d);
+        const detail = info.brand ? `${info.brand} ${info.model} (API ${info.apiVersion})` : d;
+        check(`Device: ${d}`, true, detail);
+      }
+    } else {
+      check('Device', false, 'No device connected');
+    }
+  }
+
+  // Project checks (only if in a HarmonyOS project)
+  if (fs.existsSync('build-profile.json5')) {
+    console.log('');
+
+    // Signing config
+    const products = getAvailableProducts();
+    if (products.length > 0) {
+      for (const p of products) {
+        const hasSigning = !!p.signingConfig;
+        check(`Signing (${p.name})`, hasSigning, hasSigning ? p.signingConfig : 'No signing config');
+      }
+    }
+
+    // modelVersion consistency
+    const modelVersions = collectModelVersions();
+    if (modelVersions.length > 0) {
+      const uniqueVersions = [...new Set(modelVersions.map(e => e.version))];
+      if (uniqueVersions.length === 1) {
+        check('modelVersion', true, `${uniqueVersions[0]} (consistent across ${modelVersions.length} files)`);
+      } else {
+        check('modelVersion', false, `Inconsistent: ${modelVersions.map(e => `${path.basename(e.file)}=${e.version}`).join(', ')}`);
+        console.log(`           → Run with --auto-fix-version to fix`);
+      }
+    }
+
+    // targetSdkVersion
+    const localSdkVersions = getLocalSdkVersions();
+    if (products.length > 0 && localSdkVersions.length > 0) {
+      for (const p of products) {
+        if (p.targetSdkVersion) {
+          const installed = localSdkVersions.some(v => v.version === p.targetSdkVersion);
+          check(`targetSdkVersion (${p.name})`, installed,
+            installed ? p.targetSdkVersion : `${p.targetSdkVersion} → not installed (available: ${localSdkVersions.map(v => v.version).join(', ')})`
+          );
+          if (!installed) {
+            console.log(`           → Run with --auto-fix-version to fix`);
+          }
+        }
+      }
+    }
+  }
+
+  console.log('');
+  if (hasErrors) {
+    log.warn('Some checks failed. Fix the issues above before building.');
+  } else {
+    log.success('All checks passed!');
+  }
+  console.log('');
 }
 
 // Check if hvigor version is 6.x or above (requires different command format)
@@ -1177,13 +1687,44 @@ function findPackageFile(modulePath, moduleName, ext, product = 'default') {
         // Prefer signed
         const signed = files.find(f => f.endsWith(`-signed.${ext}`));
         if (signed) return { path: path.join(outDir, signed), signed: true };
-        
+
         const any = files.find(f => f.endsWith(`.${ext}`));
         if (any) return { path: path.join(outDir, any), signed: any.includes('signed') };
       } catch (e) { /* skip */ }
     }
   }
-  
+
+  // Deep fallback: recursively search under modulePath/build/ for any matching artifact
+  // Handles non-standard module directories (e.g. flushu/moduleA)
+  const buildDir = path.join(modulePath, 'build');
+  if (fs.existsSync(buildDir)) {
+    const found = findFileRecursive(buildDir, ext, 4);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+// Recursively search for a package file (.hap/.hsp) under a directory
+function findFileRecursive(dir, ext, maxDepth, depth = 0) {
+  if (depth > maxDepth) return null;
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    // Check files at this level first (prefer signed)
+    const signedFile = entries.find(e => e.isFile() && e.name.endsWith(`-signed.${ext}`));
+    if (signedFile) return { path: path.join(dir, signedFile.name), signed: true };
+
+    const anyFile = entries.find(e => e.isFile() && e.name.endsWith(`.${ext}`) && !e.name.includes('-unsigned'));
+    if (anyFile) return { path: path.join(dir, anyFile.name), signed: anyFile.name.includes('signed') };
+
+    // Recurse into subdirectories
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== 'node_modules' && entry.name !== 'intermediates') {
+        const result = findFileRecursive(path.join(dir, entry.name), ext, maxDepth, depth + 1);
+        if (result) return result;
+      }
+    }
+  } catch { /* skip */ }
   return null;
 }
 
@@ -1292,6 +1833,19 @@ async function main() {
     showDeviceList();
     process.exit(0);
   }
+
+  // --auto-fix-version: auto-fix version mismatches and exit
+  if (options.autoFixVersion) {
+    ensureDevEcoSdkHome();
+    autoFixVersions();
+    process.exit(0);
+  }
+
+  // --check: pre-flight environment check
+  if (options.check) {
+    runPreflightCheck();
+    process.exit(0);
+  }
   
   // --log-only: just show device log, skip everything else
   if (options.logOnly) {
@@ -1330,8 +1884,13 @@ async function main() {
     // Auto-detect DEVECO_SDK_HOME if not set
     ensureDevEcoSdkHome();
 
+    // Set CI=true for non-TTY environments (prevents pnpm interactive prompts)
+    if (!process.stdout.isTTY) {
+      process.env.CI = 'true';
+    }
+
     // Find hvigor
-    const hvigorCmd = findHvigor();
+    const hvigorCmd = findHvigor(options.devecoPath);
     if (!hvigorCmd) {
       log.error('Cannot find hvigorw build tool');
       log.info('Make sure hvigorw exists in project root or install globally');
@@ -1459,9 +2018,14 @@ async function main() {
   
   // Auto-detect DEVECO_SDK_HOME if not set
   ensureDevEcoSdkHome();
-  
+
+  // Set CI=true for non-TTY environments (prevents pnpm interactive prompts)
+  if (!process.stdout.isTTY) {
+    process.env.CI = 'true';
+  }
+
   // Find hvigor
-  const hvigorCmd = findHvigor();
+  const hvigorCmd = findHvigor(options.devecoPath);
   if (!hvigorCmd) {
     log.error('Cannot find hvigorw build tool');
     log.info('Make sure hvigorw exists in project root or install globally:');
@@ -1477,7 +2041,16 @@ async function main() {
   if (hvigorVersion) {
     log.info(`Hvigor modelVersion: ${hvigorVersion}${hvigorV6 ? ' (v6+)' : ''}`);
   }
-  
+
+  // Check version compatibility before building
+  if (!options.skipBuild) {
+    const versionIssues = checkVersionCompatibility();
+    if (versionIssues.length > 0) {
+      showVersionIssues(versionIssues);
+      log.warn('Run with --auto-fix-version to auto-fix, or fix manually and retry.');
+    }
+  }
+
   // Check hdc
   if (!commandExists('hdc')) {
     log.error('Cannot find hdc tool');
@@ -1685,8 +2258,9 @@ async function main() {
     if (bundleName && localBundleType && !options.uninstall) {
       // Check bundleType conflict (e.g. atomicService vs app)
       if (checkBundleTypeConflict(device, bundleName, localBundleType)) {
-        log.warn(`Bundle type conflict detected: device has different type than local "${localBundleType}"`);
-        log.info('Auto-uninstalling to resolve type conflict...');
+        const installedType = localBundleType === 'atomicService' ? 'app' : 'atomicService';
+        log.warn(`Bundle type conflict: installed app is "${installedType}", but local project is "${localBundleType}"`);
+        log.info('Auto-uninstalling to resolve type conflict (different bundleType cannot be overwritten)...');
         try {
           const result = execSilent(`hdc -t ${device} uninstall ${bundleName}`);
           if (result.includes('successfully')) {

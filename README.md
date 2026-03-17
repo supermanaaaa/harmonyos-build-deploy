@@ -35,6 +35,10 @@ npx harmonyos-deploy --all --skip-build --launch
 - 📊 **性能统计** — 显示各阶段耗时（依赖安装、编译、安装、启动）
 - 📝 **实时日志** — 部署后一键查看设备日志，支持 tag 过滤
 - 📱 **设备列表** — 查看已连接设备的型号、系统版本等详细信息
+- 🔍 **环境预检** — `--check` 一键检查环境、工具、版本兼容性、设备连接
+- 🔧 **版本自动修复** — `--auto-fix-version` 自动修复 modelVersion/targetSdkVersion 不匹配
+- 🎯 **多版本智能选择** — 多个 DevEco Studio 共存时自动匹配项目 modelVersion
+- 🌐 **CI/CD 兼容** — 非 TTY 环境自动设置 CI=true，兼容 CI/CD 流水线
 
 ## 📋 环境要求
 
@@ -81,6 +85,15 @@ npx harmonyos-deploy --all --launch --log
 # 仅查看设备日志
 npx harmonyos-deploy --log-only
 npx harmonyos-deploy --log-only --filter MyTag
+
+# 环境预检
+npx harmonyos-deploy --check
+
+# 自动修复版本不匹配
+npx harmonyos-deploy --auto-fix-version
+
+# 指定 DevEco Studio 路径（多版本共存）
+npx harmonyos-deploy --all --launch --deveco-path "C:\Program Files\Huawei\DevEco Studio6.0.1"
 ```
 
 ### 方式二：全局安装
@@ -160,9 +173,18 @@ bash scripts/build_and_deploy.sh -b release -l
 | `--log-only` | 仅查看设备日志，不编译不安装 |
 | `--filter <tag>` | 按 tag 过滤日志（配合 `--log` 或 `--log-only` 使用）|
 
+### 环境检查与版本修复
+
+| 参数 | 说明 |
+|------|------|
+| `--check` | 预检环境：Node.js、DevEco Studio、hdc、ohpm、设备、签名、版本兼容性 |
+| `--auto-fix-version` | 自动修复 modelVersion/targetSdkVersion 不匹配问题 |
+| `--deveco-path <path>` | 手动指定 DevEco Studio 安装路径（多版本共存时使用）|
+
 ## ⚙️ 工作原理
 
-1. **环境检测** — 自动查找 hvigorw（工程级）或全局 hvigor，检测 hdc 连接的设备
+1. **环境检测** — 自动查找 hvigorw（智能匹配项目 modelVersion），检测 hdc 连接的设备
+1. **版本检查** — 检测 modelVersion/targetSdkVersion 兼容性，不匹配时警告并建议修复
 2. **依赖安装** — 执行 `ohpm install`
 3. **依赖解析** — `--all` 模式下扫描所有模块，解析 oh-package.json5 依赖关系，拓扑排序
 4. **分模块编译** — 按依赖顺序逐个编译：HAR → HSP → HAP，传递 buildMode + debuggable 参数
@@ -280,10 +302,23 @@ npx harmonyos-deploy --list-devices
 
 应用正在运行时 `bm install` 会静默失败。工具已自动在安装前 force-stop，如仍有问题请使用 `--uninstall` 先卸载。
 
+### modelVersion / targetSdkVersion 不匹配
+
+项目的 hvigor 版本或 SDK 版本与本地环境不一致时：
+
+```bash
+# 快速诊断
+npx harmonyos-deploy --check
+
+# 自动修复
+npx harmonyos-deploy --auto-fix-version
+```
+
 ### hvigorw 找不到
 
 - 确保项目根目录有 `hvigorw`（macOS/Linux）或 `hvigorw.bat`（Windows）
 - 或全局安装：`npm install -g @ohos/hvigor-cli`
+- 多版本 DevEco Studio 共存时，使用 `--deveco-path` 指定路径
 
 ## 📁 项目结构
 
