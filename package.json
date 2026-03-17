@@ -1,7 +1,7 @@
 {
   "name": "harmonyos-deploy",
-  "version": "2.3.1",
-  "description": "HarmonyOS build and deploy automation - compile multi-module apps and install to real devices with one command. Supports product variants, build modes, dependency resolution, skip-build safety checks, and APP packaging for AppGallery.",
+  "version": "2.4.0",
+  "description": "HarmonyOS build and deploy automation - compile multi-module apps and install to real devices with one command. Supports product variants, build modes, dependency resolution, skip-build safety checks, APP packaging for AppGallery, version compatibility check, and pre-flight environment verification.",
   "main": "bin/harmonyos-deploy.js",
   "type": "commonjs",
   "bin": {
