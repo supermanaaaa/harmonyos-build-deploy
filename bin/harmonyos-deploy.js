@@ -15,6 +15,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Cross-platform tool paths. Default to bare command name (PATH lookup);
+// resolveTools() may override with absolute paths discovered under DevEco Studio
+// install dir or user-level SDK roots when the command is not on PATH.
+let HDC = 'hdc';
+let OHPM = 'ohpm';
+
 // Colors for terminal output
 const colors = {
   reset: '\x1b[0m',
@@ -60,10 +66,16 @@ function diagnoseBuildError(errorOutput) {
   
   // DEVECO_SDK_HOME
   if (errStr.includes('DEVECO_SDK_HOME')) {
-    diagnostics.push({
-      issue: 'DEVECO_SDK_HOME not set or invalid',
-      fix: 'Set environment variable: $env:DEVECO_SDK_HOME = "C:\\Program Files\\Huawei\\DevEco Studio\\sdk"',
-    });
+    const plat = os.platform();
+    let fix;
+    if (plat === 'win32') {
+      fix = 'Set environment variable (PowerShell):\n       $env:DEVECO_SDK_HOME = "C:\\Program Files\\Huawei\\DevEco Studio\\sdk"';
+    } else if (plat === 'darwin') {
+      fix = 'Set environment variable (~/.zshrc or ~/.bash_profile):\n       export DEVECO_SDK_HOME="/Applications/DevEco-Studio.app/Contents/sdk"';
+    } else {
+      fix = 'Set environment variable (~/.bashrc):\n       export DEVECO_SDK_HOME="/opt/deveco-studio/sdk"';
+    }
+    diagnostics.push({ issue: 'DEVECO_SDK_HOME not set or invalid', fix });
   }
   
   // Signing error
@@ -906,6 +918,168 @@ function commandExists(cmd) {
   }
 }
 
+// Wrap an absolute path with double quotes if it contains spaces, so the
+// resulting shell command stays valid on macOS/Linux/Windows.
+function shellQuote(p) {
+  if (!p) return p;
+  return /[\s'"]/.test(p) ? `"${p}"` : p;
+}
+
+// Scan /Applications and ~/Applications for DevEco Studio installations on macOS.
+// Returns absolute .app paths, newest version first (best-effort by directory name).
+function scanMacDevEcoApps() {
+  const out = [];
+  const roots = ['/Applications', path.join(os.homedir(), 'Applications')];
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    try {
+      for (const entry of fs.readdirSync(root)) {
+        // Match DevEco-Studio.app, DevEco Studio.app, DevEco-Studio6.0.app, etc.
+        if (!/^DevEco[- ]?Studio.*\.app$/i.test(entry)) continue;
+        out.push(path.join(root, entry));
+      }
+    } catch { /* ignore */ }
+  }
+  out.sort((a, b) => {
+    const va = (path.basename(a).match(/(\d+\.\d+(?:\.\d+)?)/) || [, '0'])[1];
+    const vb = (path.basename(b).match(/(\d+\.\d+(?:\.\d+)?)/) || [, '0'])[1];
+    return vb.localeCompare(va, undefined, { numeric: true });
+  });
+  return out;
+}
+
+// Scan %ProgramFiles%/Huawei for DevEco Studio installations on Windows.
+function scanWindowsDevEcoDirs() {
+  const out = [];
+  const pfDirs = [
+    process.env['ProgramFiles'] || 'C:\\Program Files',
+    process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+  ];
+  for (const pf of pfDirs) {
+    const huaweiDir = path.join(pf, 'Huawei');
+    if (!fs.existsSync(huaweiDir)) continue;
+    try {
+      for (const entry of fs.readdirSync(huaweiDir)) {
+        if (!/DevEco/i.test(entry)) continue;
+        out.push(path.join(huaweiDir, entry, 'DevEco Studio'));
+      }
+    } catch { /* ignore */ }
+  }
+  out.sort((a, b) => {
+    const va = (path.basename(path.dirname(a)).match(/(\d+\.\d+(?:\.\d+)?)/) || [, '0'])[1];
+    const vb = (path.basename(path.dirname(b)).match(/(\d+\.\d+(?:\.\d+)?)/) || [, '0'])[1];
+    return vb.localeCompare(va, undefined, { numeric: true });
+  });
+  return out;
+}
+
+// Given a DevEco Studio root (Mac .app or Win install dir or Linux dir),
+// return the directory that contains tools/, sdk/, plugins/, etc.
+function devecoContentsRoot(devecoRoot) {
+  const plat = os.platform();
+  if (plat === 'darwin' && devecoRoot.endsWith('.app')) {
+    return path.join(devecoRoot, 'Contents');
+  }
+  return devecoRoot;
+}
+
+// Recursively look for openharmony/toolchains/<exe> inside an SDK root that
+// may have intermediate version subdirectories.
+function findToolInSdkRoot(root, exeName, maxDepth = 4) {
+  const queue = [[root, 0]];
+  while (queue.length > 0) {
+    const [dir, depth] = queue.shift();
+    if (depth > maxDepth) continue;
+    try {
+      const direct = path.join(dir, 'toolchains', exeName);
+      if (fs.existsSync(direct)) return direct;
+      const nested = path.join(dir, 'openharmony', 'toolchains', exeName);
+      if (fs.existsSync(nested)) return nested;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          queue.push([path.join(dir, entry.name), depth + 1]);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+// Cross-platform hdc resolver.
+// Returns a shell-safe command string ('hdc' if on PATH, otherwise an absolute
+// path wrapped in double quotes if needed). Null if not found anywhere.
+function resolveHdc() {
+  const plat = os.platform();
+  const exe = plat === 'win32' ? 'hdc.exe' : 'hdc';
+
+  if (commandExists('hdc')) return 'hdc';
+
+  const sdkRoots = [];
+  if (process.env.DEVECO_SDK_HOME) sdkRoots.push(process.env.DEVECO_SDK_HOME);
+
+  const devecoRoots = plat === 'darwin'
+    ? scanMacDevEcoApps()
+    : plat === 'win32'
+      ? scanWindowsDevEcoDirs()
+      : ['/opt/deveco-studio', path.join(os.homedir(), 'devecostudio')].filter(fs.existsSync);
+
+  for (const root of devecoRoots) {
+    sdkRoots.push(path.join(devecoContentsRoot(root), 'sdk'));
+  }
+
+  // User-level OpenHarmony/Huawei SDKs
+  if (plat === 'darwin') {
+    sdkRoots.push(path.join(os.homedir(), 'Library', 'Huawei', 'Sdk'));
+    sdkRoots.push(path.join(os.homedir(), 'Library', 'Huawei', 'sdk'));
+    sdkRoots.push(path.join(os.homedir(), 'Library', 'OpenHarmony', 'Sdk'));
+  } else if (plat === 'win32') {
+    sdkRoots.push(path.join(os.homedir(), 'AppData', 'Local', 'Huawei', 'sdk'));
+    sdkRoots.push(path.join(os.homedir(), 'AppData', 'Local', 'OpenHarmony', 'Sdk'));
+  } else {
+    sdkRoots.push(path.join(os.homedir(), 'OpenHarmony', 'Sdk'));
+  }
+
+  for (const root of sdkRoots) {
+    if (!root || !fs.existsSync(root)) continue;
+    const found = findToolInSdkRoot(root, exe);
+    if (found) return shellQuote(found);
+  }
+  return null;
+}
+
+// Cross-platform ohpm resolver. Same shape as resolveHdc().
+function resolveOhpm() {
+  const plat = os.platform();
+  const exe = plat === 'win32' ? 'ohpm.bat' : 'ohpm';
+
+  if (commandExists('ohpm')) return 'ohpm';
+
+  const devecoRoots = plat === 'darwin'
+    ? scanMacDevEcoApps()
+    : plat === 'win32'
+      ? scanWindowsDevEcoDirs()
+      : ['/opt/deveco-studio', path.join(os.homedir(), 'devecostudio')].filter(fs.existsSync);
+
+  for (const root of devecoRoots) {
+    const ohpmPath = path.join(devecoContentsRoot(root), 'tools', 'ohpm', 'bin', exe);
+    if (fs.existsSync(ohpmPath)) return shellQuote(ohpmPath);
+  }
+  return null;
+}
+
+// Initialize HDC/OHPM globals. Safe to call multiple times.
+function resolveTools() {
+  const hdc = resolveHdc();
+  if (hdc) HDC = hdc;
+  const ohpm = resolveOhpm();
+  if (ohpm) OHPM = ohpm;
+}
+
+// Whether hdc has been resolved (either on PATH or via DevEco install).
+function hdcAvailable() {
+  return HDC !== 'hdc' || commandExists('hdc');
+}
+
 // Find hvigor command
 // Priority: --deveco-path → project local → DevEco Studio built-in (best match) → global
 function findHvigor(devecoPath) {
@@ -990,15 +1164,47 @@ function findHvigor(devecoPath) {
 
       return `"${selected.path}"`;
     }
+  } else if (os.platform() === 'darwin') {
+    // macOS - scan all DevEco Studio*.app under /Applications and ~/Applications
+    const projectModelVersion = getHvigorVersion();
+    const candidates = [];
+    for (const app of scanMacDevEcoApps()) {
+      const hvigorPath = path.join(app, 'Contents', 'tools', 'hvigor', 'bin', 'hvigorw');
+      if (fs.existsSync(hvigorPath)) {
+        const versionMatch = path.basename(app).match(/(\d+\.\d+\.\d+|\d+\.\d+)/);
+        candidates.push({
+          path: hvigorPath,
+          dirName: path.basename(app),
+          version: versionMatch ? versionMatch[1] : null,
+        });
+      }
+    }
+
+    if (candidates.length > 0) {
+      let selected = candidates[0];
+      if (candidates.length > 1 && projectModelVersion) {
+        const projectMajorMinor = projectModelVersion.split('.').slice(0, 2).join('.');
+        const exactMatch = candidates.find(c => c.version && c.version === projectModelVersion);
+        const majorMinorMatch = candidates.find(c => c.version && c.version.startsWith(projectMajorMinor));
+        if (exactMatch) selected = exactMatch;
+        else if (majorMinorMatch) selected = majorMinorMatch;
+        log.info(`Found ${candidates.length} DevEco Studio installation(s): ${candidates.map(c => c.dirName).join(', ')}`);
+        log.info(`Selected: ${selected.dirName}${projectModelVersion ? ` (project modelVersion: ${projectModelVersion})` : ''}`);
+      } else {
+        log.info(`Found DevEco Studio hvigorw: ${selected.path}`);
+      }
+      return shellQuote(selected.path);
+    }
   } else {
-    // macOS
-    const macPaths = [
-      '/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw',
+    // Linux - DevEco Studio Linux is uncommon; check a few standard locations
+    const linuxPaths = [
+      '/opt/deveco-studio/tools/hvigor/bin/hvigorw',
+      path.join(os.homedir(), 'devecostudio', 'tools', 'hvigor', 'bin', 'hvigorw'),
     ];
-    for (const p of macPaths) {
+    for (const p of linuxPaths) {
       if (fs.existsSync(p)) {
         log.info(`Found DevEco Studio hvigorw: ${p}`);
-        return `"${p}"`;
+        return shellQuote(p);
       }
     }
   }
@@ -1382,13 +1588,20 @@ function runPreflightCheck() {
   const hvigorVersion = getHvigorVersion();
   check('hvigorw', !!hvigorCmd, hvigorCmd ? `${hvigorCmd}${hvigorVersion ? ` (modelVersion ${hvigorVersion})` : ''}` : 'Not found');
 
-  // hdc
-  const hdcFound = commandExists('hdc');
-  check('hdc', hdcFound, hdcFound ? 'found' : 'Not found - add HarmonyOS SDK toolchains to PATH');
+  // hdc — try PATH first, then auto-discover under DevEco install
+  resolveTools();
+  const hdcFound = hdcAvailable();
+  const hdcDetail = hdcFound
+    ? (HDC === 'hdc' ? 'found on PATH' : `auto-discovered: ${HDC}`)
+    : 'Not found - install DevEco Studio or add HarmonyOS SDK toolchains to PATH';
+  check('hdc', hdcFound, hdcDetail);
 
-  // ohpm
-  const ohpmFound = commandExists('ohpm');
-  check('ohpm', ohpmFound, ohpmFound ? 'found' : 'Not found');
+  // ohpm — same fallback strategy
+  const ohpmFound = OHPM !== 'ohpm' || commandExists('ohpm');
+  const ohpmDetail = ohpmFound
+    ? (OHPM === 'ohpm' ? 'found on PATH' : `auto-discovered: ${OHPM}`)
+    : 'Not found';
+  check('ohpm', ohpmFound, ohpmDetail);
 
   // Devices
   if (hdcFound) {
@@ -1467,30 +1680,29 @@ function ensureDevEcoSdkHome() {
   if (process.env.DEVECO_SDK_HOME && fs.existsSync(process.env.DEVECO_SDK_HOME)) {
     return; // already set and valid
   }
-  
-  const isWindows = os.platform() === 'win32';
+
+  const plat = os.platform();
   const candidates = [];
-  
-  if (isWindows) {
-    const programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
-    // Scan for DevEco Studio installations
-    try {
-      const huaweiDir = path.join(programFiles, 'Huawei');
-      if (fs.existsSync(huaweiDir)) {
-        const entries = fs.readdirSync(huaweiDir).filter(d => d.startsWith('DevEco'));
-        for (const deveco of entries.sort().reverse()) {
-          candidates.push(path.join(huaweiDir, deveco, 'DevEco Studio', 'sdk'));
-        }
-      }
-    } catch (e) { /* ignore */ }
+
+  if (plat === 'win32') {
+    for (const devecoStudioDir of scanWindowsDevEcoDirs()) {
+      candidates.push(path.join(devecoStudioDir, 'sdk'));
+    }
     candidates.push(path.join(os.homedir(), 'AppData', 'Local', 'Huawei', 'sdk'));
     candidates.push(path.join(os.homedir(), 'AppData', 'Local', 'OpenHarmony', 'Sdk'));
-  } else {
+  } else if (plat === 'darwin') {
+    for (const app of scanMacDevEcoApps()) {
+      candidates.push(path.join(app, 'Contents', 'sdk'));
+    }
+    candidates.push(path.join(os.homedir(), 'Library', 'Huawei', 'Sdk'));
     candidates.push(path.join(os.homedir(), 'Library', 'Huawei', 'sdk'));
     candidates.push(path.join(os.homedir(), 'Library', 'OpenHarmony', 'Sdk'));
-    candidates.push('/Applications/DevEco-Studio.app/Contents/sdk');
+  } else {
+    candidates.push('/opt/deveco-studio/sdk');
+    candidates.push(path.join(os.homedir(), 'devecostudio', 'sdk'));
+    candidates.push(path.join(os.homedir(), 'OpenHarmony', 'Sdk'));
   }
-  
+
   for (const p of candidates) {
     if (fs.existsSync(p)) {
       process.env.DEVECO_SDK_HOME = p;
@@ -1503,7 +1715,7 @@ function ensureDevEcoSdkHome() {
 
 // Get connected devices
 function getDevices() {
-  const output = execSilent('hdc list targets');
+  const output = execSilent(`${HDC} list targets`);
   if (!output) return [];
   
   return output
@@ -1516,21 +1728,24 @@ function getDevices() {
 function getDeviceInfo(deviceId) {
   const info = {};
   try {
-    info.model = execSilent(`hdc -t ${deviceId} shell param get const.product.model`) || 'Unknown';
-    info.brand = execSilent(`hdc -t ${deviceId} shell param get const.product.brand`) || '';
-    info.osVersion = execSilent(`hdc -t ${deviceId} shell param get const.product.software.version`) || '';
-    info.apiVersion = execSilent(`hdc -t ${deviceId} shell param get const.ohos.apiversion`) || '';
+    info.model = execSilent(`${HDC} -t ${deviceId} shell param get const.product.model`) || 'Unknown';
+    info.brand = execSilent(`${HDC} -t ${deviceId} shell param get const.product.brand`) || '';
+    info.osVersion = execSilent(`${HDC} -t ${deviceId} shell param get const.product.software.version`) || '';
+    info.apiVersion = execSilent(`${HDC} -t ${deviceId} shell param get const.ohos.apiversion`) || '';
   } catch (e) { /* ignore */ }
   return info;
 }
 
 // List devices with details
 function showDeviceList() {
-  if (!commandExists('hdc')) {
+  resolveTools();
+  if (!hdcAvailable()) {
     log.error('Cannot find hdc tool');
+    log.info('Install DevEco Studio or add HarmonyOS SDK toolchains to PATH.');
     return;
   }
-  
+
+
   const devices = getDevices();
   if (devices.length === 0) {
     log.info('No devices connected');
@@ -1558,7 +1773,7 @@ function startLogStream(device, bundleName, filter) {
   log.info('');
   
   // Build hilog command with filter
-  let logCmd = `hdc -t ${device} shell hilog`;
+  let logCmd = `${HDC} -t ${device} shell hilog`;
   
   // Use hilog filter if bundleName available
   const filterParts = [];
@@ -1571,7 +1786,7 @@ function startLogStream(device, bundleName, filter) {
   
   if (filterParts.length > 0) {
     // Use grep to filter (hilog's own filter is limited)
-    logCmd = `hdc -t ${device} shell "hilog | grep -E '${filterParts.join('|')}'"`;
+    logCmd = `${HDC} -t ${device} shell "hilog | grep -E '${filterParts.join('|')}'"`;
   }
   
   try {
@@ -1785,7 +2000,7 @@ function checkBundleTypeConflict(device, bundleName, localBundleType) {
   
   try {
     // Use bm dump to check installed app info
-    const result = execSilent(`hdc -t ${device} shell bm dump -n ${bundleName}`);
+    const result = execSilent(`${HDC} -t ${device} shell bm dump -n ${bundleName}`);
     if (!result || result.includes('error')) return false;
     
     // Check if the installed type differs
@@ -1813,12 +2028,16 @@ function getAbilityName(module) {
 // Main function
 async function main() {
   const options = parseArgs();
-  
+
   if (options.help) {
     showHelp();
     process.exit(0);
   }
-  
+
+  // Resolve HDC/OHPM once so all subsequent code paths see absolute paths
+  // when the tools aren't on PATH (typical on macOS DevEco Studio installs).
+  resolveTools();
+
   if (options.listProducts) {
     showProducts();
     process.exit(0);
@@ -1849,8 +2068,10 @@ async function main() {
   
   // --log-only: just show device log, skip everything else
   if (options.logOnly) {
-    if (!commandExists('hdc')) {
+    resolveTools();
+    if (!hdcAvailable()) {
       log.error('Cannot find hdc tool');
+      log.info('Install DevEco Studio or add HarmonyOS SDK toolchains to PATH.');
       process.exit(1);
     }
     const devices = getDevices();
@@ -1914,7 +2135,7 @@ async function main() {
     timer.start('Dependencies');
     log.info('Installing dependencies (ohpm install)...');
     try {
-      exec('ohpm install', { silent: false });
+      exec(`${OHPM} install`, { silent: false });
       log.success('Dependencies installed');
     } catch (error) {
       log.warn('ohpm install failed, continuing anyway...');
@@ -2051,10 +2272,10 @@ async function main() {
     }
   }
 
-  // Check hdc
-  if (!commandExists('hdc')) {
+  // Check hdc — resolveTools() has already run at main() entry
+  if (!hdcAvailable()) {
     log.error('Cannot find hdc tool');
-    log.info('Add HarmonyOS SDK toolchains to your PATH');
+    log.info('Install DevEco Studio or add HarmonyOS SDK toolchains to PATH.');
     process.exit(1);
   }
   
@@ -2098,7 +2319,7 @@ async function main() {
     timer.start('Dependencies');
     log.info('Installing dependencies (ohpm install)...');
     try {
-      exec('ohpm install', { silent: false });
+      exec(`${OHPM} install`, { silent: false });
       log.success('Dependencies installed');
     } catch (error) {
       log.warn('ohpm install failed, continuing anyway...');
@@ -2262,7 +2483,7 @@ async function main() {
         log.warn(`Bundle type conflict: installed app is "${installedType}", but local project is "${localBundleType}"`);
         log.info('Auto-uninstalling to resolve type conflict (different bundleType cannot be overwritten)...');
         try {
-          const result = execSilent(`hdc -t ${device} uninstall ${bundleName}`);
+          const result = execSilent(`${HDC} -t ${device} uninstall ${bundleName}`);
           if (result.includes('successfully')) {
             log.success('Uninstall completed (type conflict resolved)');
           }
@@ -2276,7 +2497,7 @@ async function main() {
     if (bundleName) {
       log.info(`Uninstalling existing app: ${bundleName}...`);
       try {
-        const result = execSilent(`hdc -t ${device} uninstall ${bundleName}`);
+        const result = execSilent(`${HDC} -t ${device} uninstall ${bundleName}`);
         if (result.includes('successfully')) {
           log.success('Uninstall completed');
         } else {
@@ -2295,7 +2516,7 @@ async function main() {
     const bundleName = getBundleName(options.product);
     if (bundleName) {
       try {
-        execSilent(`hdc -t ${device} shell aa force-stop ${bundleName}`);
+        execSilent(`${HDC} -t ${device} shell aa force-stop ${bundleName}`);
         log.info(`Stopped running app: ${bundleName}`);
       } catch {
         // App may not be running, ignore
@@ -2437,7 +2658,7 @@ async function main() {
       const label = `[${i + 1}/${installFiles.length}]`;
       
       try {
-        execSync(`hdc -t ${device} file send "${pkg.path}" "${devicePath}"`, { encoding: 'utf8', stdio: 'pipe' });
+        execSync(`${HDC} -t ${device} file send "${pkg.path}" "${devicePath}"`, { encoding: 'utf8', stdio: 'pipe' });
         devicePaths.push(devicePath);
         log.info(`  ${label} Pushed: ${pkg.module} (${pkg.type.toUpperCase()})`);
       } catch (error) {
@@ -2455,7 +2676,7 @@ async function main() {
     log.info('Installing via bundle manager (bm install)...');
     
     try {
-      const result = execSync(`hdc -t ${device} shell bm install ${bmPaths}`, { encoding: 'utf8', stdio: 'pipe' }).trim();
+      const result = execSync(`${HDC} -t ${device} shell bm install ${bmPaths}`, { encoding: 'utf8', stdio: 'pipe' }).trim();
       log.info(`bm install result: ${result}`);
       
       if (result.includes('successfully') && !result.includes('error:') && !result.includes('failed')) {
@@ -2486,7 +2707,7 @@ async function main() {
     // Step 3: Clean up temp files on device
     for (const dp of devicePaths) {
       try {
-        execSync(`hdc -t ${device} shell rm -rf "${dp}"`, { encoding: 'utf8', stdio: 'pipe' });
+        execSync(`${HDC} -t ${device} shell rm -rf "${dp}"`, { encoding: 'utf8', stdio: 'pipe' });
       } catch (e) { /* ignore cleanup errors */ }
     }
     
@@ -2538,7 +2759,7 @@ async function main() {
     // Install
     log.info(`Installing to device ${device}...`);
     try {
-      exec(`hdc -t ${device} install "${hap.path}"`);
+      exec(`${HDC} -t ${device} install "${hap.path}"`);
       log.success('Install completed!');
     } catch (error) {
       log.error('Install failed');
@@ -2559,7 +2780,7 @@ async function main() {
     if (bundleName) {
       log.info(`Launching app: ${bundleName} / ${abilityName}`);
       try {
-        exec(`hdc -t ${device} shell aa start -a ${abilityName} -b ${bundleName}`, { silent: true });
+        exec(`${HDC} -t ${device} shell aa start -a ${abilityName} -b ${bundleName}`, { silent: true });
       } catch {
         log.warn('Launch failed, please open app manually');
       }
