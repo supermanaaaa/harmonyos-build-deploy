@@ -784,30 +784,29 @@ function getModuleBuildCommand(hvigorCmd, module, buildMode, product = 'default'
 function buildCommand(hvigorCmd, task, params = {}, hvigorV6 = false) {
   const parts = [hvigorCmd];
   
-  if (hvigorV6) {
-    // Hvigor 6.x: simplified command, no --mode module or -p parameters
-    // Just: hvigorw assembleHap --no-daemon
-    parts.push(task);
-    parts.push('--no-daemon');
-  } else {
-    // Hvigor 5.x: full parameter format
-    if (params.module) {
-      parts.push('--mode module');
-      parts.push(`-p module=${params.module}`);
-    }
-    if (params.product) {
-      parts.push(`-p product=${params.product}`);
-    }
-    if (params.buildMode) {
-      parts.push(`-p buildMode=${params.buildMode}`);
-    }
-    if (params.debuggable !== undefined) {
-      parts.push(`-p debuggable=${params.debuggable}`);
-    }
-    
-    parts.push(task);
-    parts.push('--no-daemon');
+  // Hvigor 6 dropped `--mode module` (module-level assembly is implicit when
+  // the `-p module=` parameter is present), but it still accepts the -p
+  // parameters for product / buildMode / debuggable. Without them, the
+  // build uses build-profile.json5 defaults — which means --release /
+  // --product / --no-debuggable would silently produce a debug-default hap.
+  if (!hvigorV6 && params.module) {
+    parts.push('--mode module');
   }
+  if (params.module) {
+    parts.push(`-p module=${params.module}`);
+  }
+  if (params.product) {
+    parts.push(`-p product=${params.product}`);
+  }
+  if (params.buildMode) {
+    parts.push(`-p buildMode=${params.buildMode}`);
+  }
+  if (params.debuggable !== undefined) {
+    parts.push(`-p debuggable=${params.debuggable}`);
+  }
+
+  parts.push(task);
+  parts.push('--no-daemon');
   
   return parts.join(' ');
 }
@@ -818,24 +817,21 @@ function buildCommand(hvigorCmd, task, params = {}, hvigorV6 = false) {
 function buildAppCommand(hvigorCmd, product = 'default', buildMode = 'release', hvigorV6 = false) {
   const parts = [hvigorCmd];
 
-  if (hvigorV6) {
-    // Hvigor 6.x: simplified command
-    parts.push('assembleApp');
-    parts.push('--no-daemon');
-  } else {
-    // Hvigor 5.x: full parameter format with --mode project
+  // Hvigor 6 still needs the -p params; only `--mode project` is dropped
+  // (project-level assembly is implicit when no `-p module=` is given).
+  if (!hvigorV6) {
     parts.push('--mode project');
-    if (product) {
-      parts.push(`-p product=${product}`);
-    }
-    if (buildMode) {
-      parts.push(`-p buildMode=${buildMode}`);
-    }
-    // APP for AppGallery must be non-debuggable
-    parts.push('-p debuggable=false');
-    parts.push('assembleApp');
-    parts.push('--no-daemon');
   }
+  if (product) {
+    parts.push(`-p product=${product}`);
+  }
+  if (buildMode) {
+    parts.push(`-p buildMode=${buildMode}`);
+  }
+  // APP for AppGallery must always be non-debuggable
+  parts.push('-p debuggable=false');
+  parts.push('assembleApp');
+  parts.push('--no-daemon');
 
   return parts.join(' ');
 }
