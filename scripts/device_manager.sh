@@ -29,24 +29,54 @@ show_help() {
     exit 0
 }
 
-# 检查 hdc
+# 跨平台寻找 hdc：PATH → DevEco Studio sdk 下 toolchains
+find_hdc() {
+    if command -v hdc &>/dev/null; then
+        command -v hdc
+        return 0
+    fi
+    local sdk_roots=()
+    case "$(uname -s)" in
+        Darwin)
+            for app in /Applications/DevEco*Studio*.app "$HOME/Applications"/DevEco*Studio*.app; do
+                [[ -d "$app" ]] && sdk_roots+=("$app/Contents/sdk")
+            done
+            sdk_roots+=("$HOME/Library/Huawei/Sdk" "$HOME/Library/Huawei/sdk" "$HOME/Library/OpenHarmony/Sdk")
+            ;;
+        Linux)
+            [[ -d /opt/deveco-studio/sdk ]] && sdk_roots+=(/opt/deveco-studio/sdk)
+            sdk_roots+=("$HOME/devecostudio/sdk" "$HOME/OpenHarmony/Sdk")
+            ;;
+    esac
+    for root in "${sdk_roots[@]}"; do
+        [[ -d "$root" ]] || continue
+        local found
+        found=$(find "$root" -maxdepth 5 -type f -path "*/toolchains/hdc" 2>/dev/null | head -1)
+        [[ -n "$found" ]] && { echo "$found"; return 0; }
+    done
+    return 1
+}
+
+# 解析 hdc 路径并校验存在
+HDC=""
 check_hdc() {
-    if ! command -v hdc &> /dev/null; then
-        log_error "hdc 未找到，请确保 HarmonyOS SDK 已配置"
+    HDC=$(find_hdc || true)
+    if [[ -z "$HDC" ]]; then
+        log_error "hdc 未找到，请安装 DevEco Studio 或把 HarmonyOS SDK toolchains 加入 PATH"
         exit 1
     fi
 }
 
 # 获取第一个设备
 get_first_device() {
-    hdc list targets 2>/dev/null | grep -v "^\[" | grep -v "^$" | head -1
+    "$HDC" list targets 2>/dev/null | grep -v "^\[" | grep -v "^$" | head -1
 }
 
 case "${1:-help}" in
     list)
         check_hdc
         log_info "已连接的设备："
-        DEVICES=$(hdc list targets 2>/dev/null | grep -v "^\[" | grep -v "^$" || true)
+        DEVICES=$("$HDC" list targets 2>/dev/null | grep -v "^\[" | grep -v "^$" || true)
         if [[ -z "$DEVICES" ]]; then
             log_error "没有检测到设备"
         else
@@ -65,10 +95,11 @@ case "${1:-help}" in
         fi
         log_info "设备信息: $DEVICE"
         echo "----------------------------------------"
-        echo "型号: $(hdc -t "$DEVICE" shell getprop ro.product.model 2>/dev/null || echo '未知')"
-        echo "系统版本: $(hdc -t "$DEVICE" shell getprop hw_sc.build.platform.version 2>/dev/null || echo '未知')"
-        echo "SDK 版本: $(hdc -t "$DEVICE" shell getprop const.ohos.apiversion 2>/dev/null || echo '未知')"
-        echo "序列号: $(hdc -t "$DEVICE" shell getprop ro.serialno 2>/dev/null || echo '未知')"
+        echo "品牌: $("$HDC" -t "$DEVICE" shell param get const.product.brand 2>/dev/null || echo '未知')"
+        echo "型号: $("$HDC" -t "$DEVICE" shell param get const.product.model 2>/dev/null || echo '未知')"
+        echo "系统版本: $("$HDC" -t "$DEVICE" shell param get const.product.software.version 2>/dev/null || echo '未知')"
+        echo "API 版本: $("$HDC" -t "$DEVICE" shell param get const.ohos.apiversion 2>/dev/null || echo '未知')"
+        echo "序列号: $("$HDC" -t "$DEVICE" shell param get const.product.serial 2>/dev/null || echo '未知')"
         ;;
     
     log)
@@ -79,7 +110,7 @@ case "${1:-help}" in
             exit 1
         fi
         log_info "查看设备日志（Ctrl+C 退出）..."
-        hdc -t "$DEVICE" hilog
+        "$HDC" -t "$DEVICE" hilog
         ;;
     
     screenshot)
@@ -92,20 +123,21 @@ case "${1:-help}" in
         TIMESTAMP=$(date +%Y%m%d_%H%M%S)
         FILENAME="screenshot_${TIMESTAMP}.png"
         log_info "截取屏幕..."
-        hdc -t "$DEVICE" shell snapshot_display -f /data/local/tmp/screen.png
-        hdc -t "$DEVICE" file recv /data/local/tmp/screen.png "./$FILENAME"
-        hdc -t "$DEVICE" shell rm /data/local/tmp/screen.png
+        "$HDC" -t "$DEVICE" shell snapshot_display -f /data/local/tmp/screen.png
+        "$HDC" -t "$DEVICE" file recv /data/local/tmp/screen.png "./$FILENAME"
+        "$HDC" -t "$DEVICE" shell rm /data/local/tmp/screen.png
         log_success "截图已保存: $FILENAME"
         ;;
     
     restart-hdc)
+        check_hdc
         log_info "重启 hdc 服务..."
-        hdc kill 2>/dev/null || true
+        "$HDC" kill 2>/dev/null || true
         sleep 1
-        hdc start
+        "$HDC" start
         sleep 2
         log_success "hdc 服务已重启"
-        hdc list targets
+        "$HDC" list targets
         ;;
     
     uninstall)
@@ -121,7 +153,7 @@ case "${1:-help}" in
             exit 1
         fi
         log_info "卸载 $PKG ..."
-        hdc -t "$DEVICE" uninstall "$PKG"
+        "$HDC" -t "$DEVICE" uninstall "$PKG"
         log_success "卸载完成"
         ;;
     

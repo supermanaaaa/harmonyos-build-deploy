@@ -44,6 +44,53 @@ function Write-Success { param([string]$msg) Write-Host "[SUCCESS] $msg" -Foregr
 function Write-Warn { param([string]$msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 function Write-Err { param([string]$msg) Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
+# Scan %ProgramFiles%\Huawei for DevEco Studio installations.
+function Get-DevEcoRoots {
+    $roots = @()
+    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $pf) { continue }
+        $huawei = Join-Path $pf "Huawei"
+        if (-not (Test-Path $huawei)) { continue }
+        Get-ChildItem -Path $huawei -Directory -Filter "DevEco*" -ErrorAction SilentlyContinue | ForEach-Object {
+            $studio = Join-Path $_.FullName "DevEco Studio"
+            if (Test-Path $studio) { $roots += $studio }
+        }
+    }
+    # Newest version first
+    $roots | Sort-Object { (Split-Path -Leaf (Split-Path -Parent $_)) } -Descending
+}
+
+# Cross-platform tool resolver: PATH -> DevEco install -> user-level SDK.
+# $SubPath is the path under <DevEco Studio>/ (e.g. tools\hvigor\bin\hvigorw.bat).
+function Find-Tool {
+    param([string]$Name, [string]$SubPath, [string]$ToolchainExe)
+
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    if ($SubPath) {
+        foreach ($root in (Get-DevEcoRoots)) {
+            $candidate = Join-Path $root $SubPath
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+
+    if ($ToolchainExe) {
+        $sdkRoots = @()
+        foreach ($root in (Get-DevEcoRoots)) { $sdkRoots += (Join-Path $root "sdk") }
+        $sdkRoots += (Join-Path $env:LOCALAPPDATA "Huawei\sdk")
+        $sdkRoots += (Join-Path $env:LOCALAPPDATA "OpenHarmony\Sdk")
+        foreach ($root in $sdkRoots) {
+            if (-not (Test-Path $root)) { continue }
+            $found = Get-ChildItem -Path $root -Recurse -Filter $ToolchainExe -ErrorAction SilentlyContinue |
+                     Where-Object { $_.FullName -like "*\toolchains\$ToolchainExe" } |
+                     Select-Object -First 1
+            if ($found) { return $found.FullName }
+        }
+    }
+    return $null
+}
+
 Write-Info "Working directory: $(Get-Location)"
 
 # Check if HarmonyOS project
@@ -57,27 +104,29 @@ $hvigorCmd = $null
 if (Test-Path "hvigorw.bat") {
     $hvigorCmd = ".\hvigorw.bat"
 }
-elseif (Get-Command "hvigorw" -ErrorAction SilentlyContinue) {
-    $hvigorCmd = "hvigorw"
-}
 else {
+    $hvigorCmd = Find-Tool -Name "hvigorw" -SubPath "tools\hvigor\bin\hvigorw.bat"
+}
+if (-not $hvigorCmd) {
     Write-Err "Cannot find hvigorw build tool"
-    Write-Info "Make sure hvigorw.bat exists in project root or install globally: npm install -g @ohos/hvigor-cli"
+    Write-Info "Make sure hvigorw.bat exists in project root, install DevEco Studio, or run: npm install -g @ohos/hvigor-cli"
     exit 1
 }
 
 Write-Info "Using build tool: $hvigorCmd"
 
-# Check hdc
-if (-not (Get-Command "hdc" -ErrorAction SilentlyContinue)) {
+# Find hdc (auto-discover under DevEco install if not on PATH)
+$hdc = Find-Tool -Name "hdc" -ToolchainExe "hdc.exe"
+if (-not $hdc) {
     Write-Err "Cannot find hdc tool"
-    Write-Info "Add HarmonyOS SDK toolchains to PATH"
+    Write-Info "Install DevEco Studio or add HarmonyOS SDK toolchains to PATH"
     exit 1
 }
+Write-Info "Using hdc: $hdc"
 
 # Get devices
 Write-Info "Checking connected devices..."
-$rawDevices = & hdc list targets 2>&1
+$rawDevices = & $hdc list targets 2>&1
 $devices = $rawDevices | Where-Object { $_ -and ($_ -notmatch "^\[") -and ($_ -notmatch "Empty") }
 
 if (-not $devices) {
@@ -198,7 +247,7 @@ Write-Info "HAP file: $hapFile"
 # Install
 Write-Info "Installing to device $Device ..."
 
-$installOutput = & hdc -t $Device install $hapFile 2>&1
+$installOutput = & $hdc -t $Device install $hapFile 2>&1
 $installOutput | ForEach-Object { Write-Host $_ }
 
 if ($LASTEXITCODE -ne 0) {
@@ -229,7 +278,7 @@ if ($Launch) {
     
     if ($bundleName) {
         Write-Info "Launching app: $bundleName / $abilityName"
-        & hdc -t $Device shell aa start -a $abilityName -b $bundleName
+        & $hdc -t $Device shell aa start -a $abilityName -b $bundleName
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "Launch failed, please open app manually"
         }

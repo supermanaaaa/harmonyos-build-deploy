@@ -39,6 +39,66 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# 跨平台寻找工具：先 PATH，再 DevEco Studio 安装目录，再用户级 SDK。
+# 用法：find_tool <name> [extra_subpath_under_deveco_contents...]
+# 第一个 extra 参数应是相对 .app/Contents 或 DevEco 安装根的子路径，
+# 例如 tools/ohpm/bin/ohpm 或 tools/hvigor/bin/hvigorw。
+find_tool() {
+    local name="$1"
+    shift
+
+    if command -v "$name" &>/dev/null; then
+        command -v "$name"
+        return 0
+    fi
+
+    local deveco_roots=()
+    case "$(uname -s)" in
+        Darwin)
+            for app in /Applications/DevEco*Studio*.app "$HOME/Applications"/DevEco*Studio*.app; do
+                [[ -d "$app" ]] || continue
+                deveco_roots+=("$app/Contents")
+            done
+            ;;
+        Linux)
+            [[ -d /opt/deveco-studio ]] && deveco_roots+=(/opt/deveco-studio)
+            [[ -d "$HOME/devecostudio" ]] && deveco_roots+=("$HOME/devecostudio")
+            ;;
+    esac
+
+    # 1. DevEco 安装目录里的固定子路径（hvigorw / ohpm 等）
+    for sub in "$@"; do
+        for root in "${deveco_roots[@]}"; do
+            if [[ -x "$root/$sub" ]]; then
+                echo "$root/$sub"
+                return 0
+            fi
+        done
+    done
+
+    # 2. 兜底：在 DevEco 安装目录与用户级 SDK 下搜索 toolchains/<name>（适合 hdc）
+    local sdk_roots=("${deveco_roots[@]/%//sdk}")
+    case "$(uname -s)" in
+        Darwin)
+            sdk_roots+=("$HOME/Library/Huawei/Sdk" "$HOME/Library/Huawei/sdk" "$HOME/Library/OpenHarmony/Sdk")
+            ;;
+        Linux)
+            sdk_roots+=("$HOME/OpenHarmony/Sdk")
+            ;;
+    esac
+    for root in "${sdk_roots[@]}"; do
+        [[ -d "$root" ]] || continue
+        local found
+        found=$(find "$root" -maxdepth 5 -type f -path "*/toolchains/$name" 2>/dev/null | head -1)
+        if [[ -n "$found" ]]; then
+            echo "$found"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 show_help() {
     head -20 "$0" | tail -15
     exit 0
@@ -75,29 +135,37 @@ if [[ ! -f "build-profile.json5" ]]; then
     exit 1
 fi
 
-# 检测构建工具
+# 检测构建工具 hvigorw
 HVIGOR_CMD=""
 if [[ -f "hvigorw" ]]; then
     HVIGOR_CMD="./hvigorw"
 elif [[ -f "hvigorw.bat" ]] && [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     HVIGOR_CMD="./hvigorw.bat"
-elif command -v hvigorw &> /dev/null; then
-    HVIGOR_CMD="hvigorw"
 else
+    HVIGOR_CMD=$(find_tool hvigorw tools/hvigor/bin/hvigorw || true)
+fi
+if [[ -z "$HVIGOR_CMD" ]]; then
     log_error "找不到 hvigorw 构建工具"
-    log_info "请确保项目根目录有 hvigorw 或全局安装: npm install -g @ohos/hvigor-cli"
+    log_info "请确保项目根目录有 hvigorw，或安装 DevEco Studio，或全局安装: npm install -g @ohos/hvigor-cli"
     exit 1
 fi
+log_info "使用构建工具: $HVIGOR_CMD"
 
-# 检测 hdc
-if ! command -v hdc &> /dev/null; then
-    log_error "找不到 hdc 工具，请确保 HarmonyOS SDK 已正确配置"
+# 检测 hdc：先 PATH，再 DevEco SDK toolchains（Mac 默认不在 PATH）
+HDC=$(find_tool hdc || true)
+if [[ -z "$HDC" ]]; then
+    log_error "找不到 hdc 工具"
+    log_info "请安装 DevEco Studio，或把 HarmonyOS SDK 的 toolchains 加入 PATH"
     exit 1
 fi
+log_info "使用 hdc: $HDC"
+
+# 检测 ohpm（可选，仅在需要 ohpm install 时使用）
+OHPM=$(find_tool ohpm tools/ohpm/bin/ohpm || true)
 
 # 获取设备列表
 log_info "检查连接的设备..."
-DEVICES=$(hdc list targets 2>/dev/null | grep -v "^\[" | grep -v "^$" || true)
+DEVICES=$("$HDC" list targets 2>/dev/null | grep -v "^\[" | grep -v "^$" || true)
 
 if [[ -z "$DEVICES" ]]; then
     log_error "没有检测到已连接的设备"
@@ -188,7 +256,7 @@ log_info "HAP 文件: $HAP_FILE"
 # 安装应用
 log_info "正在安装到设备 $DEVICE_ID ..."
 
-INSTALL_OUTPUT=$(hdc -t "$DEVICE_ID" install "$HAP_FILE" 2>&1) || INSTALL_EXIT_CODE=$?
+INSTALL_OUTPUT=$("$HDC" -t "$DEVICE_ID" install "$HAP_FILE" 2>&1) || INSTALL_EXIT_CODE=$?
 
 echo "$INSTALL_OUTPUT"
 
@@ -228,7 +296,7 @@ if [[ "$LAUNCH_APP" == true ]]; then
     
     if [[ -n "$BUNDLE_NAME" ]]; then
         log_info "启动应用: $BUNDLE_NAME / $ABILITY_NAME"
-        hdc -t "$DEVICE_ID" shell aa start -a "$ABILITY_NAME" -b "$BUNDLE_NAME" || log_warn "启动失败，请手动打开应用"
+        "$HDC" -t "$DEVICE_ID" shell aa start -a "$ABILITY_NAME" -b "$BUNDLE_NAME" || log_warn "启动失败，请手动打开应用"
     fi
 fi
 
