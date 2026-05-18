@@ -10,12 +10,15 @@ Add a skill for building, signing, and deploying HarmonyOS (鸿蒙) applications
 
 ### Key Features
 
-- **Multi-module support**: Automatically resolves dependencies and builds in correct order (HAR → HSP → HAP)
-- **Product variants**: Switch between environments (test/staging/production) with different signing configs
-- **Build modes**: debug, release, test, or custom modes
-- **APP packaging**: Generate `.app` files for AppGallery submission
-- **Device management**: Auto-detect devices, real-time log streaming
-- **CI/CD ready**: Used in Jenkins pipelines for automated builds
+- **Cross-platform out of the box**: Windows, macOS, and Linux. Auto-discovers hvigorw / hdc / ohpm / JBR from DevEco Studio's install dir — no PATH setup required (v2.5+ / v2.6+).
+- **Tolerant SDK version matching**: Uses any locally installed SDK whose API ≥ project target; never silently rewrites the user's `build-profile.json5`.
+- **Multi-module support**: Automatically resolves dependencies and builds in correct order (HAR → HSP → HAP).
+- **Product variants**: Switch between environments (test/staging/production) with different signing configs.
+- **Build modes**: debug, release, test, or custom modes.
+- **APP packaging**: Generate `.app` files for AppGallery submission.
+- **Device management**: Auto-detect devices, real-time log streaming.
+- **Pre-flight check**: `--check` validates Node, DEVECO_SDK_HOME, JAVA_HOME, hvigorw, hdc, ohpm, devices, signing, modelVersion consistency, and target SDK compatibility.
+- **CI/CD ready**: Used in Jenkins pipelines for automated builds.
 
 ### Use Cases
 
@@ -33,8 +36,8 @@ skills/Development & Technical/harmonyos-build-deploy/
 
 ## Testing
 
-- ✅ Tested with Claude Code on Windows and macOS
-- ✅ Published to npm as `harmonyos-deploy` (v2.3.1, 70+ downloads)
+- ✅ Tested with Claude Code on Windows and macOS (end-to-end on a real multi-module HarmonyOS project: ohpm install → assembleHap → bm install → aa start)
+- ✅ Published to npm as `harmonyos-deploy` (v2.6.0)
 - ✅ Used in production CI/CD environments
 
 ## External Resources
