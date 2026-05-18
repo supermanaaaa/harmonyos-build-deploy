@@ -77,6 +77,20 @@ function diagnoseBuildError(errorOutput) {
     }
     diagnostics.push({ issue: 'DEVECO_SDK_HOME not set or invalid', fix });
   }
+
+  // Java runtime missing (hvigor PackageHap step)
+  if (errStr.includes('Unable to locate a Java Runtime') || errStr.includes('JAVA_HOME')) {
+    const plat = os.platform();
+    let fix;
+    if (plat === 'darwin') {
+      fix = 'DevEco Studio bundles a JBR. v2.6+ auto-sets JAVA_HOME from\n       /Applications/DevEco-Studio.app/Contents/jbr/Contents/Home — re-run with the latest CLI.\n       Manual: export JAVA_HOME="/Applications/DevEco-Studio.app/Contents/jbr/Contents/Home"';
+    } else if (plat === 'win32') {
+      fix = 'Set JAVA_HOME (PowerShell):\n       $env:JAVA_HOME = "C:\\Program Files\\Huawei\\DevEco Studio\\jbr"';
+    } else {
+      fix = 'Set JAVA_HOME (~/.bashrc):\n       export JAVA_HOME="/opt/deveco-studio/jbr"';
+    }
+    diagnostics.push({ issue: 'Java runtime not found (required for HAP packaging)', fix });
+  }
   
   // Signing error
   if (errStr.includes('sign') || errStr.includes('signature') || errStr.includes('SignProfile')) {
@@ -94,7 +108,7 @@ function diagnoseBuildError(errorOutput) {
       : '';
     diagnostics.push({
       issue: 'SDK version mismatch',
-      fix: `Run: npx harmonyos-deploy --auto-fix-version${availableStr}\n     Or manually update targetSdkVersion/compatibleSdkVersion in build-profile.json5`,
+      fix: `Open DevEco Studio → SDK Manager and install the SDK API required by the project.${availableStr}\n     Last-resort (rewrites project source): npx harmonyos-deploy --auto-fix-version`,
     });
   }
   
@@ -1318,6 +1332,44 @@ function getLocalSdkVersions() {
   return versions;
 }
 
+// Extract the API integer from a HarmonyOS SDK version string.
+// Examples:
+//   "6.0.0(20)"          -> 20
+//   "OpenHarmony API 22" -> 22
+//   "6.0.2"              -> null  (no API marker)
+function parseSdkApi(versionStr) {
+  if (!versionStr) return null;
+  const parenMatch = String(versionStr).match(/\((\d+)\)/);
+  if (parenMatch) return parseInt(parenMatch[1], 10);
+  const apiMatch = String(versionStr).match(/API\s+(\d+)/i);
+  if (apiMatch) return parseInt(apiMatch[1], 10);
+  return null;
+}
+
+// Given a project target version like "6.0.0(20)" and a list of locally
+// installed SDK versions, return the best local entry that can build the
+// project, or null if none can.
+//
+// Compatibility rules (kept conservative on purpose - we never want to
+// silently substitute and have a real build break later):
+//   - Exact string match always wins.
+//   - Else any local entry whose API >= target API is considered compatible.
+//     The newest such entry is returned (localSdkVersions is already sorted
+//     newest-first by getLocalSdkVersions).
+function findCompatibleSdkVersion(targetVersion, localSdkVersions) {
+  if (!targetVersion || !Array.isArray(localSdkVersions) || localSdkVersions.length === 0) {
+    return null;
+  }
+  const exact = localSdkVersions.find(v => v.version === targetVersion);
+  if (exact) return { ...exact, exact: true };
+
+  const targetApi = parseSdkApi(targetVersion);
+  if (targetApi == null) return null;
+  const compatible = localSdkVersions.find(v => (v.api || 0) >= targetApi);
+  if (compatible) return { ...compatible, exact: false };
+  return null;
+}
+
 // Collect all oh-package.json5 modelVersion entries across the project
 function collectModelVersions() {
   const entries = [];
@@ -1411,13 +1463,18 @@ function checkVersionCompatibility() {
     const localSdkVersions = getLocalSdkVersions();
     const localVersionStrings = localSdkVersions.map(v => v.version);
 
+    // We only flag a version mismatch when NO locally installed SDK is
+    // compatible with the project's requirement (i.e. no local API >= target
+    // API). If a compatible local SDK exists, hvigor 6+ will pick it up and
+    // the build will proceed — rewriting the project's build-profile.json5
+    // is not something this tool should do silently.
     for (const product of buildProfile.app.products) {
       if (product.targetSdkVersion) {
-        const found = localVersionStrings.some(v => v === product.targetSdkVersion);
-        if (!found && localSdkVersions.length > 0) {
+        const compat = findCompatibleSdkVersion(product.targetSdkVersion, localSdkVersions);
+        if (!compat && localSdkVersions.length > 0) {
           issues.push({
             type: 'targetSdkVersion_missing',
-            message: `targetSdkVersion "${product.targetSdkVersion}" not found in local SDK`,
+            message: `targetSdkVersion "${product.targetSdkVersion}" not satisfied by any local SDK`,
             product: product.name,
             target: product.targetSdkVersion,
             available: localVersionStrings,
@@ -1425,11 +1482,11 @@ function checkVersionCompatibility() {
         }
       }
       if (product.compatibleSdkVersion) {
-        const found = localVersionStrings.some(v => v === product.compatibleSdkVersion);
-        if (!found && localSdkVersions.length > 0) {
+        const compat = findCompatibleSdkVersion(product.compatibleSdkVersion, localSdkVersions);
+        if (!compat && localSdkVersions.length > 0) {
           issues.push({
             type: 'compatibleSdkVersion_missing',
-            message: `compatibleSdkVersion "${product.compatibleSdkVersion}" not found in local SDK`,
+            message: `compatibleSdkVersion "${product.compatibleSdkVersion}" not satisfied by any local SDK`,
             product: product.name,
             target: product.compatibleSdkVersion,
             available: localVersionStrings,
@@ -1458,10 +1515,12 @@ function showVersionIssues(issues) {
       console.log(issue.details);
       console.log(`     ${colors.cyan}→ Fix: Run with --auto-fix-version to synchronize all modelVersion values${colors.reset}`);
     } else if (issue.type === 'targetSdkVersion_missing' || issue.type === 'compatibleSdkVersion_missing') {
+      const targetApi = parseSdkApi(issue.target);
       if (issue.available && issue.available.length > 0) {
         console.log(`     Local SDK versions: ${issue.available.join(', ')}`);
       }
-      console.log(`     ${colors.cyan}→ Fix: Run with --auto-fix-version to update to a locally available version${colors.reset}`);
+      console.log(`     ${colors.cyan}→ Recommended: open DevEco Studio → SDK Manager and install API ${targetApi || issue.target}, so the project keeps building against its declared SDK.${colors.reset}`);
+      console.log(`     ${colors.dim}  Fallback (rewrites project source): npx harmonyos-deploy --auto-fix-version${colors.reset}`);
     }
     console.log('');
   }
@@ -1580,8 +1639,16 @@ function runPreflightCheck() {
 
   // DevEco Studio
   ensureDevEcoSdkHome();
+  ensureJavaHome();
   const sdkHome = process.env.DEVECO_SDK_HOME;
   check('DEVECO_SDK_HOME', !!sdkHome, sdkHome || 'Not found');
+
+  // JAVA_HOME (hvigor PackageHap needs a JDK; Mac /usr/bin/java is a stub)
+  const javaHome = process.env.JAVA_HOME;
+  const javaExe = os.platform() === 'win32' ? 'java.exe' : 'java';
+  const javaValid = javaHome && fs.existsSync(path.join(javaHome, 'bin', javaExe));
+  check('JAVA_HOME', javaValid,
+    javaValid ? javaHome : 'Not found - install DevEco Studio (bundles JBR) or set JAVA_HOME to a JDK');
 
   // hvigorw
   const hvigorCmd = findHvigor();
@@ -1642,18 +1709,25 @@ function runPreflightCheck() {
       }
     }
 
-    // targetSdkVersion
+    // targetSdkVersion — pass if exact OR if a compatible higher-API local
+    // SDK is available (hvigor 6+ will use it). Only fail when nothing local
+    // can satisfy the project requirement.
     const localSdkVersions = getLocalSdkVersions();
     if (products.length > 0 && localSdkVersions.length > 0) {
       for (const p of products) {
-        if (p.targetSdkVersion) {
-          const installed = localSdkVersions.some(v => v.version === p.targetSdkVersion);
-          check(`targetSdkVersion (${p.name})`, installed,
-            installed ? p.targetSdkVersion : `${p.targetSdkVersion} → not installed (available: ${localSdkVersions.map(v => v.version).join(', ')})`
-          );
-          if (!installed) {
-            console.log(`           → Run with --auto-fix-version to fix`);
-          }
+        if (!p.targetSdkVersion) continue;
+        const compat = findCompatibleSdkVersion(p.targetSdkVersion, localSdkVersions);
+        if (compat && compat.exact) {
+          check(`targetSdkVersion (${p.name})`, true, p.targetSdkVersion);
+        } else if (compat) {
+          check(`targetSdkVersion (${p.name})`, true,
+            `${p.targetSdkVersion} → using compatible local ${compat.version} (API ${compat.api})`);
+        } else {
+          const targetApi = parseSdkApi(p.targetSdkVersion);
+          check(`targetSdkVersion (${p.name})`, false,
+            `${p.targetSdkVersion} → no compatible local SDK (available: ${localSdkVersions.map(v => v.version).join(', ')})`);
+          console.log(`           → Install API ${targetApi || p.targetSdkVersion} via DevEco Studio's SDK Manager`);
+          console.log(`           ${colors.dim}  (last-resort: --auto-fix-version, which rewrites project source)${colors.reset}`);
         }
       }
     }
@@ -1711,6 +1785,49 @@ function ensureDevEcoSdkHome() {
     }
   }
   // Not found, let hvigor handle it (may fail with its own error)
+}
+
+// Setup JAVA_HOME if not already set, by pointing at the JBR bundled with
+// DevEco Studio. hvigor's PackageHap step requires a JDK; on macOS the
+// system /usr/bin/java is just a stub that fails unless a real JDK is
+// installed, so we proactively wire up the bundled JBR.
+function ensureJavaHome() {
+  const plat = os.platform();
+  const javaExe = plat === 'win32' ? 'java.exe' : 'java';
+
+  const isValid = (home) => home && fs.existsSync(path.join(home, 'bin', javaExe));
+  if (isValid(process.env.JAVA_HOME)) return;
+
+  const candidates = [];
+  if (plat === 'darwin') {
+    for (const app of scanMacDevEcoApps()) {
+      candidates.push(path.join(app, 'Contents', 'jbr', 'Contents', 'Home'));
+    }
+  } else if (plat === 'win32') {
+    for (const root of scanWindowsDevEcoDirs()) {
+      candidates.push(path.join(root, 'jbr'));
+    }
+  } else {
+    candidates.push('/opt/deveco-studio/jbr');
+    candidates.push(path.join(os.homedir(), 'devecostudio', 'jbr'));
+  }
+
+  for (const home of candidates) {
+    if (isValid(home)) {
+      process.env.JAVA_HOME = home;
+      // Prepend java's bin to PATH so hvigor child processes resolve `java`
+      // without relying on the shell login profile.
+      const javaBinDir = path.join(home, 'bin');
+      const pathSep = plat === 'win32' ? ';' : ':';
+      if (!String(process.env.PATH || '').split(pathSep).includes(javaBinDir)) {
+        process.env.PATH = `${javaBinDir}${pathSep}${process.env.PATH || ''}`;
+      }
+      log.info(`Auto-detected JAVA_HOME: ${home}`);
+      return;
+    }
+  }
+  // Not found - hvigor PackageHap will fail with "Unable to locate a Java
+  // Runtime"; diagnoseBuildError() catches that case and shows a fix.
 }
 
 // Get connected devices
@@ -2056,6 +2173,7 @@ async function main() {
   // --auto-fix-version: auto-fix version mismatches and exit
   if (options.autoFixVersion) {
     ensureDevEcoSdkHome();
+    ensureJavaHome();
     autoFixVersions();
     process.exit(0);
   }
@@ -2104,6 +2222,7 @@ async function main() {
 
     // Auto-detect DEVECO_SDK_HOME if not set
     ensureDevEcoSdkHome();
+    ensureJavaHome();
 
     // Set CI=true for non-TTY environments (prevents pnpm interactive prompts)
     if (!process.stdout.isTTY) {
@@ -2237,8 +2356,9 @@ async function main() {
     process.exit(1);
   }
   
-  // Auto-detect DEVECO_SDK_HOME if not set
+  // Auto-detect DEVECO_SDK_HOME / JAVA_HOME (required by hvigor's PackageHap)
   ensureDevEcoSdkHome();
+  ensureJavaHome();
 
   // Set CI=true for non-TTY environments (prevents pnpm interactive prompts)
   if (!process.stdout.isTTY) {
