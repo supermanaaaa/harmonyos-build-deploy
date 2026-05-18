@@ -281,11 +281,13 @@ npx harmonyos-deploy --list-devices
 
 ### hdc 找不到
 
-确保 HarmonyOS SDK 的 toolchains 目录已添加到系统 PATH：
+v2.5 起，工具会**自动**从 DevEco Studio 安装目录寻找 `hdc` / `ohpm`，无需手动加 PATH。自动扫描范围：
 
-- **Windows**: `C:\Users\<用户名>\AppData\Local\OpenHarmony\Sdk\<版本>\toolchains`
-- **macOS**: `~/Library/OpenHarmony/Sdk/<版本>/toolchains`
-- **Linux**: `~/OpenHarmony/Sdk/<版本>/toolchains`
+- **Windows**: `%ProgramFiles%\Huawei\DevEco Studio*\DevEco Studio\sdk\...\openharmony\toolchains\hdc.exe` + `%LOCALAPPDATA%\Huawei\sdk` + `%LOCALAPPDATA%\OpenHarmony\Sdk`
+- **macOS**: `/Applications/DevEco-Studio*.app/Contents/sdk/...` + `~/Library/Huawei/Sdk` + `~/Library/OpenHarmony/Sdk`
+- **Linux**: `/opt/deveco-studio/sdk` + `~/devecostudio/sdk` + `~/OpenHarmony/Sdk`
+
+若仍找不到，可手动添加 toolchains 目录到 PATH，或设置 `DEVECO_SDK_HOME` 环境变量后再跑。运行 `npx harmonyos-deploy --check` 查看当前解析到的路径。
 
 ### 设备连接不上
 
